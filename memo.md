@@ -6,30 +6,39 @@ nvcc -ptx src/kernels/search.cu -o src/kernels/search.ptx \
     -std=c++17 \
     -O3 \
     --use_fast_math
+
+
+nvcc -ptx src/kernels/compute_covariance.cu -o src/kernels/compute_covariance.ptx \
+    --gpu-architecture=compute_86 \
+    --gpu-code=sm_86,sm_89,sm_90 \
+    -std=c++17 \
+    -O3 \
+    --use_fast_math
 ```
 
 # Logs
 ```bash
-Debug: source points: 19937, target points: 19937
-KNN search took: 1.532227ms
-Debug: source points: 20024, target points: 20024
-KNN search took: 1.538529ms
-Debug: source points: 19922, target points: 19922
+voxel_size = 0.5
+Debug: v_source points: 1105, v_target points: 1105
+KNN search took: 88.857µs
+Calculating covariance took: 714.342µs
+Debug: v_source points: 1118, v_target points: 1118
+KNN search took: 90.55µs
+Calculating covariance took: 713.41µs
+Debug: v_source points: 1149, v_target points: 1149
+KNN search took: 93.707µs
+Calculating covariance took: 736.714µs
+Debug: v_source points: 1151, v_target points: 1151
 
-
-Debug: v_source points: 5691, v_target points: 5691
-KNN search took: 436.689µs
-Debug: v_source points: 5670, v_target points: 5670
-KNN search took: 436.308µs
-Debug: v_source points: 5654, v_target points: 5654
-KNN search took: 434.424µs
-Debug: v_source points: 5695, v_target points: 5695
-
-Debug: v_source points: 1182, v_target points: 1182
-KNN search took: 94.367µs
-Debug: v_source points: 1182, v_target points: 1182
-KNN search took: 94.347µs
-Debug: v_source points: 1166, v_target points: 1166
-KNN search took: 93.305µs
-Debug: v_source points: 1180, v_target points: 1180
+voxel_size = 0.1
+Debug: v_source points: 5556, v_target points: 5556
+KNN search took: 392.497µs
+Calculating covariance took: 2.264224ms
+Debug: v_source points: 5506, v_target points: 5506
+KNN search took: 388.681µs
+Calculating covariance took: 2.293126ms
+Debug: v_source points: 5562, v_target points: 5562
+KNN search took: 392.889µs
+Calculating covariance took: 2.286606ms
+Debug: v_source points: 5624, v_target points: 5624
 ```

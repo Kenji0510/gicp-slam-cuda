@@ -14,18 +14,14 @@ pub struct CudaKnnContext {
 impl CudaKnnContext {
     pub fn new(ptx_path: &str) -> Result<Self> {
         let ctx = CudaContext::new(0)?;
+        Self::from_context(ctx, ptx_path)
+    }
+
+    pub fn from_context(ctx: Arc<CudaContext>, ptx_path: &str) -> Result<Self> {
         let stream = ctx.default_stream();
-
-        let module = ctx.load_module(Ptx::from_file(ptx_path))
-            .context("Failed to load PTX module")?;
-        let func = module.load_function("find_nearest_neighbor")
-            .context("Kernel function not found in PTX")?;
-
-        Ok(Self {
-            ctx, 
-            stream,
-            func
-        })
+        let module = ctx.load_module(Ptx::from_file(ptx_path))?;
+        let func = module.load_function("find_nearest_neighbor")?;
+        Ok(Self { ctx, stream, func })
     }
 
     pub fn find_nearest(

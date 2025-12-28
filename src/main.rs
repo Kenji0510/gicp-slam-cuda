@@ -2,7 +2,8 @@ use core::f64;
 use std::collections::VecDeque;
 
 use anyhow::{Result, Context};
-use gicp_slam_cuda::{gpu_search::CudaKnnContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::load_pcd_xyzt, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
+use cudarc::driver::CudaContext;
+use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::load_pcd_xyzt, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use ndarray::{Array2, Axis};
 use serde::Serialize;
@@ -12,9 +13,11 @@ const PCD_DIR: &str = "data/input/mid360/pcds/mid360-20251125-03";
 const IMU_FILE_PATH: &str = "data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
+const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 20.0;
+const MAX_ITERATIONS: usize = 10;
 
 #[derive(Serialize)]
 struct PoseData {
@@ -65,7 +68,10 @@ fn main() -> Result<()> {
         .expect("Failed to load initial PCD file");
 
     println!("Initializing CUDA...");
-    let gpu_knn = CudaKnnContext::new(KNN_PTX_PATH)?;
+    let ctx = CudaContext::new(0)
+        .context("Failed to create CUDA context")?;
+    let mut gpu_knn = CudaKnnContext::from_context(ctx.clone(), KNN_PTX_PATH)?;
+    let mut gpu_cov = CudaCovContext::from_context(ctx.clone(), COV_PTX_PATH)?;
     println!("CUDA initialized.");
 
     let mut gicp_odometry = GicpOdometry {
@@ -141,15 +147,34 @@ fn main() -> Result<()> {
         };
 
         // Debug
-        let voxel_szie = 0.5;
-        let (v_preprocessed_current_points, v_preprocessed_current_covs) = voxel_downsample_with_cov(&preprocessed_current_points, &vec![], voxel_szie);
-        let (v_target_pts, v_target_covs) = voxel_downsample_with_cov(&target_pts, &target_covs, voxel_szie);
+        let voxel_size = 0.5;
+        let (v_preprocessed_current_points, v_preprocessed_current_covs) = voxel_downsample_with_cov(&preprocessed_current_points, &vec![], voxel_size);
+        let (v_target_pts, v_target_covs) = voxel_downsample_with_cov(&target_pts, &target_covs, voxel_size);
 
         // println!("Debug: source points: {}, target points: {}", preprocessed_current_points.nrows(), target_pts.nrows());
         println!("Debug: v_source points: {}, v_target points: {}", v_preprocessed_current_points.nrows(), v_target_pts.nrows());
-        // let (indices, dists_sq) = gpu_knn.find_nearest(&preprocessed_current_points, &target_pts)
-        let (indices, dists_sq) = gpu_knn.find_nearest(&v_preprocessed_current_points, &v_target_pts)
-            .expect("Failed to perform GPU k-NN search");
+        
+        // Compute covariances for current frame points
+        let computed_covs = gpu_cov.compute_covariances(&v_preprocessed_current_points)
+            .expect("Failed to compute covariances on GPU");
+
+        let mut current_transform = predicted_pose.clone();
+
+        let start = std::time::Instant::now();
+        for i in 0..MAX_ITERATIONS {
+            // Rotation source points by predicted pose
+            let transformd_source = transform_points(&v_preprocessed_current_points, &current_transform);
+
+            // let (indices, dists_sq) = gpu_knn.find_nearest(&preprocessed_current_points, &target_pts)
+            let (indices, dists_sq) = gpu_knn.find_nearest(&transformd_source, &v_target_pts)
+                .expect("Failed to perform GPU k-NN search");
+
+
+        }
+        let gicp_duration = start.elapsed();
+        println!("GICP for frame {} took {:?}", i, gicp_duration);
+
+        
     }
 
     Ok(())
@@ -262,4 +287,22 @@ fn voxel_downsample_with_cov(
     }
 
     (new_pts, new_covs)
+}
+
+/// Transform 3D points using ndarray operations
+fn transform_points(points: &Array2<f32>, transform: &Array2<f32>) -> Array2<f32> {
+    let n = points.nrows();
+    
+    // Extract 3×3 rotation matrix
+    let rotation = transform.slice(ndarray::s![0..3, 0..3]);
+    
+    // Extract translation vector (3×1)
+    let translation = transform.slice(ndarray::s![0..3, 3]);
+    
+    // result = points @ R^T + t
+    // (N×3) @ (3×3) + (3,) broadcasts to (N×3)
+    let rotated = points.dot(&rotation.t());
+    
+    // Add translation using broadcasting
+    rotated + &translation.insert_axis(Axis(0))
 }
