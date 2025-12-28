@@ -10,3 +10,4 @@ pub mod predict_pose_imu;
 pub mod pre_process_pcd;
 pub mod gpu_search;
 pub mod gpu_cov;
+pub mod gpu_voxel;

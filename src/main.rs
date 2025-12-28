@@ -3,7 +3,7 @@ use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 
 use anyhow::{Result, Context};
 use cudarc::driver::CudaContext;
-use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
+use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use ndarray::{Array1, Array2, Axis, s};
 use ndarray_linalg::Solve;
@@ -17,12 +17,13 @@ const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/mid360_gicp_global_map.
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
+const VOXEL_PTX_PATH: &str = "src/kernels/voxel.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 20.0;
 const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
-const LOCAL_MAP_SIZE: usize = 10;
+const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
@@ -90,8 +91,9 @@ fn main() -> Result<()> {
     println!("Initializing CUDA...");
     let ctx = CudaContext::new(0)
         .context("Failed to create CUDA context")?;
-    let mut gpu_knn = CudaKnnContext::from_context(ctx.clone(), KNN_PTX_PATH)?;
+    let gpu_knn = CudaKnnContext::from_context(ctx.clone(), KNN_PTX_PATH)?;
     let mut gpu_cov = CudaCovContext::from_context(ctx.clone(), COV_PTX_PATH)?;
+    let mut gpu_voxel = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
     println!("CUDA initialized.");
 
     let mut gicp_odometry = GicpOdometry {
@@ -192,10 +194,19 @@ fn main() -> Result<()> {
         };
 
         // Voxel downsample both source and target point clouds
-        let voxel_size = 0.5;
+        let voxel_size = VOXEL_SIZE;
         let start = std::time::Instant::now();
-        let v_preprocessed_current_points = voxel_downsample(&preprocessed_current_points, voxel_size);
-        let v_target_pts = voxel_downsample(&target_pts, voxel_size);
+        // let v_preprocessed_current_points = voxel_downsample(&preprocessed_current_points, voxel_size);
+        let v_preprocessed_current_points = gpu_voxel.voxel_downsample(
+            &preprocessed_current_points, 
+            preprocessed_current_points.nrows(), 
+            voxel_size
+        )?;
+        let v_target_pts = gpu_voxel.voxel_downsample(
+            &target_pts,
+            target_pts.nrows(),
+            voxel_size
+        )?;
         let downsample_duration = start.elapsed();
         println!("Debug: v_source points: {}, v_target points: {}", v_preprocessed_current_points.nrows(), v_target_pts.nrows());
         println!("Voxel downsampling took {:?}", downsample_duration);
