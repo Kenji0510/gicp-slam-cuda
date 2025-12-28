@@ -1,5 +1,5 @@
 use core::f64;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 
 use anyhow::{Result, Context};
 use cudarc::driver::CudaContext;
@@ -20,10 +20,13 @@ const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 20.0;
-const VOXEL_SIZE: f32 = 0.1;
+const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
 const LOCAL_MAP_SIZE: usize = 10;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
+
+const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
+const KEYFRAME_ANGLE_THRESHOLD: f32 = 0.1 * std::f32::consts::PI / 180.0; // radians
 
 
 #[derive(Serialize)]
@@ -42,6 +45,14 @@ struct FrameData {
 struct RmseStats {
     frame_index: usize,
     rmse: f32,
+}
+
+#[derive(Debug, Clone)]
+struct TrajectoryRecord {
+    min_dist: f32,
+    min_degree: f32,
+    max_dist: f32,
+    max_degree: f32,
 }
 
 struct GicpOdometry {
@@ -93,6 +104,13 @@ fn main() -> Result<()> {
         rmse_log: Vec::new(),
     };
 
+    let mut traj_record = TrajectoryRecord {
+        min_dist: INFINITY,
+        min_degree: INFINITY,
+        max_dist: NEG_INFINITY,
+        max_degree: NEG_INFINITY,
+    };
+
     let mut process_time_stats = ProcessTimeStats {
         total_time: std::time::Duration::new(0, 0),
         total_gicp_time: std::time::Duration::new(0, 0),
@@ -108,6 +126,8 @@ fn main() -> Result<()> {
     gicp_odometry.gicp_traj_log.push(
         extract_pose_from_matrix(base_timestamp, &gicp_odometry.current_g_pose)
     );
+
+    let mut last_keyframe_pose = gicp_odometry.current_g_pose.clone();
 
     for (i, pcd_path) in pcd_paths.iter().enumerate().skip(1) {
         // Load current pcd frame
@@ -303,20 +323,70 @@ fn main() -> Result<()> {
 
         gicp_odometry.last_timestamp = current_frame_timestamp;
 
-        // Rotation current points to global frame
-        let aligned_current_points = transform_points(&preprocessed_current_points, &gicp_odometry.current_g_pose);
+        // 並進距離の計算
+        let current_pos = gicp_odometry.current_g_pose.slice(s![0..3, 3]);
+        let last_key_pos = last_keyframe_pose.slice(s![0..3, 3]);
+        let delta_dist = ((current_pos[0usize] - last_key_pos[0usize]).powi(2) + 
+                          (current_pos[1usize] - last_key_pos[1usize]).powi(2) + 
+                          (current_pos[2usize] - last_key_pos[2usize]).powi(2)).sqrt();
 
-        // Update local and global maps
-        if gicp_odometry.local_map.len() >= LOCAL_MAP_SIZE {
-            gicp_odometry.local_map.pop_front();
-        }
+        // 回転角の計算 (トレースから概算)
+        // R_delta = R_last^T * R_curr
+        // Angle = arccos((tr(R_delta) - 1) / 2)
+        let r_curr = gicp_odometry.current_g_pose.slice(s![0..3, 0..3]);
+        let r_last = last_keyframe_pose.slice(s![0..3, 0..3]);
+        // R_delta のトレース計算 (行列積の対角成分の和)
+        let tr_r_delta = 
+            (r_last[[0,0]]*r_curr[[0,0]] + r_last[[1,0]]*r_curr[[1,0]] + r_last[[2,0]]*r_curr[[2,0]]) + // (R_last^T)_row0 * R_curr_col0
+            (r_last[[0,1]]*r_curr[[0,1]] + r_last[[1,1]]*r_curr[[1,1]] + r_last[[2,1]]*r_curr[[2,1]]) + 
+            (r_last[[0,2]]*r_curr[[0,2]] + r_last[[1,2]]*r_curr[[1,2]] + r_last[[2,2]]*r_curr[[2,2]]);
+        
+        let delta_angle = ((tr_r_delta - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
 
-        gicp_odometry.local_map.push_back(FrameData {
-            points: aligned_current_points.clone(),
-        });
+        // 2. 閾値チェック (初回の数フレームは強制的に追加しても良い)
+        let is_keyframe = delta_dist > KEYFRAME_DIST_THRESHOLD || delta_angle > KEYFRAME_ANGLE_THRESHOLD;
 
-        if (i % 3) == 0 {
-            global_map_accumulator.push(aligned_current_points.clone());
+        // if is_keyframe {
+        if i % 3 == 0 {
+            // let delta_degree = delta_angle * 180.0 / std::f32::consts::PI;
+            // println!("Frame {} is a keyframe (Δdist: {:.3} m, Δangle: {:.3} deg)", 
+            //     i, delta_dist, delta_degree);
+            println!("Frame {} is a keyframe (Δdist: {:.3} m, Δangle: {:.3} rad)", 
+                i, delta_dist, delta_angle);
+
+            if delta_dist < traj_record.min_dist {
+                // println!("  Updating min_dist: {:.3} -> {:.3}", traj_record.min_dist, delta_dist);
+                traj_record.min_dist = delta_dist;
+            }
+            if delta_dist > traj_record.max_dist {
+                // println!("  Updating max_dist: {:.3} -> {:.3}", traj_record.max_dist, delta_dist);
+                traj_record.max_dist = delta_dist;
+            }
+            if delta_angle < traj_record.min_degree {
+                // println!("  Updating min_angle: {:.3} -> {:.3}", traj_record.min_angle, delta_angle);
+                traj_record.min_degree = delta_angle;
+            }
+            if delta_angle > traj_record.max_degree {
+                // println!("  Updating max_angle: {:.3} -> {:.3}", traj_record.max_angle, delta_angle);
+                traj_record.max_degree = delta_angle;
+            }
+
+            last_keyframe_pose = gicp_odometry.current_g_pose.clone();
+            // Rotation current points to global frame
+            let aligned_current_points = transform_points(&preprocessed_current_points, &gicp_odometry.current_g_pose);
+
+            // Update local and global maps
+            if gicp_odometry.local_map.len() >= LOCAL_MAP_SIZE {
+                gicp_odometry.local_map.pop_front();
+            }
+
+            gicp_odometry.local_map.push_back(FrameData {
+                points: aligned_current_points.clone(),
+            });
+
+            if (i % 6) == 0 {
+                global_map_accumulator.push(aligned_current_points.clone());
+            }
         }
 
         // Update trajectory log
@@ -331,6 +401,12 @@ fn main() -> Result<()> {
     }
 
     println!();
+    println!("Trajectory Record:");
+    println!("  Min Distance: {:.4} m", traj_record.min_dist);
+    println!("  Max Distance: {:.4} m", traj_record.max_dist);
+    println!("  Min Degree   : {:.4} deg", traj_record.min_degree  * 180.0 / std::f32::consts::PI);
+    println!("  Max Degree   : {:.4} deg", traj_record.max_degree * 180.0 / std::f32::consts::PI);
+    println!();
     print_parameters(&process_time_stats);
 
     let final_global_map = ndarray::concatenate(
@@ -338,7 +414,8 @@ fn main() -> Result<()> {
     &global_map_accumulator.iter().map(|arr| arr.view()).collect::<Vec<_>>()
     ).context("Failed to concatenate global map")?;
 
-    let v_final_global_map = voxel_downsample(&final_global_map, VOXEL_SIZE);
+    let voxel_size = 0.1;
+    let v_final_global_map = voxel_downsample(&final_global_map, voxel_size);
     let final_pcd = array2_to_pcd(&v_final_global_map);
     save_pcd_xyz(&final_pcd, FINAL_MAP_SAVE_PATH)
         .context("Failed to save final global map PCD")?;

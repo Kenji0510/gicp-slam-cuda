@@ -1,4 +1,4 @@
-#define K 20
+#define K 12
 
 extern "C" __global__ void compute_covariance(
     const float* __restrict__ points,

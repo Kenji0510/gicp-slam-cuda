@@ -42,3 +42,9 @@ KNN search took: 392.889µs
 Calculating covariance took: 2.286606ms
 Debug: v_source points: 5624, v_target points: 5624
 ```
+
+Trajectory Record:
+  Min Distance: 0.0000 m
+  Max Distance: 0.3159 m
+  Min Degree   : 0.0000 deg
+  Max Degree   : 6.4101 deg
