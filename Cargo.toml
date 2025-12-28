@@ -16,7 +16,7 @@ rayon = "1.11.0"
 cudarc = { version = "0.18.1", features = ["cuda-12060"] }
 
 ndarray = { version = "0.15", features = ["blas", "rayon"] }
-# ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
+ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 nalgebra = "0.34.1"
 
 blas-src = { version = "0.10", features = ["openblas"] }

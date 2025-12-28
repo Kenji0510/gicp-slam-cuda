@@ -56,7 +56,7 @@ impl CudaKnnContext {
 
         let cfg = LaunchConfig::for_num_elems(num_source as u32);
 
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
         unsafe {
             self.stream.launch_builder(&self.func)
             .arg(&d_source)
@@ -72,8 +72,8 @@ impl CudaKnnContext {
         self.stream.synchronize()
             .context("Stream sync failed")?;
 
-        let _duration = start.elapsed();
-        println!("KNN search took: {:?}", _duration);
+        // let _duration = start.elapsed();
+        // println!("KNN search took: {:?}", _duration);
 
         let indices: Vec<i32> = self.stream
             .clone_dtoh(&d_indices)

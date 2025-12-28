@@ -81,7 +81,7 @@ impl CudaCovContext {
 
         let cfg = LaunchConfig::for_num_elems(num_points as u32);
 
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
         unsafe {
             self.stream.launch_builder(&self.func)
                 .arg(d_points)
@@ -94,8 +94,8 @@ impl CudaCovContext {
         self.stream.synchronize()
             .context("Stream sync failed")?;
 
-        let _duration = start.elapsed();
-        println!("Calculating covariance took: {:?}", _duration);
+        // let _duration = start.elapsed();
+        // println!("Calculating covariance took: {:?}", _duration);
 
         let d_covs = self.buf_covs.as_ref().unwrap();
         let d_covs_view = d_covs.slice(0..num_points * 9);
@@ -149,8 +149,8 @@ impl CudaCovContext {
             })
             .collect();
         
-        let elapsed = start.elapsed();
-        println!("Regularizing covariances took: {:?}", elapsed);
+        // let elapsed = start.elapsed();
+        // println!("Regularizing covariances took: {:?}", elapsed);
 
         Ok(regularized_covs)
 
