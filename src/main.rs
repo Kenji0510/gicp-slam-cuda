@@ -22,7 +22,7 @@ const TRANSFORM_PTX_PATH: &str = "src/kernels/transform.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 20.0;
-const VOXEL_SIZE: f32 = 0.1;
+const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
 const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
