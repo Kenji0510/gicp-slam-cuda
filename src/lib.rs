@@ -11,3 +11,4 @@ pub mod pre_process_pcd;
 pub mod gpu_search;
 pub mod gpu_cov;
 pub mod gpu_voxel;
+pub mod gpu_transform;

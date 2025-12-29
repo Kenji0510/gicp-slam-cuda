@@ -2,8 +2,8 @@ use core::f64;
 use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 
 use anyhow::{Result, Context};
-use cudarc::driver::CudaContext;
-use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
+use cudarc::driver::{CudaContext, CudaSlice};
+use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, gpu_transform::CudaTransformContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use ndarray::{Array1, Array2, Axis, s};
 use ndarray_linalg::Solve;
@@ -18,10 +18,11 @@ const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/mid360_gicp_global_map.
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
 const VOXEL_PTX_PATH: &str = "src/kernels/voxel.ptx";
+const TRANSFORM_PTX_PATH: &str = "src/kernels/transform.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 20.0;
-const VOXEL_SIZE: f32 = 0.5;
+const VOXEL_SIZE: f32 = 0.1;
 const MAX_ITERATIONS: usize = 5;
 const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
@@ -68,8 +69,12 @@ struct GicpOdometry {
 }
 
 struct ProcessTimeStats {
-    total_time: std::time::Duration,
+    total_voxel_time: std::time::Duration,
+    total_cov_time: std::time::Duration,
+    total_transform_time: std::time::Duration,
+    total_knn_time: std::time::Duration,
     total_gicp_time: std::time::Duration,
+    total_time: std::time::Duration,
     count: usize,
 }
 
@@ -94,6 +99,7 @@ fn main() -> Result<()> {
     let gpu_knn = CudaKnnContext::from_context(ctx.clone(), KNN_PTX_PATH)?;
     let mut gpu_cov = CudaCovContext::from_context(ctx.clone(), COV_PTX_PATH)?;
     let mut gpu_voxel = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
+    let mut gpu_transform = CudaTransformContext::new(ctx.clone(), TRANSFORM_PTX_PATH)?;
     println!("CUDA initialized.");
 
     let mut gicp_odometry = GicpOdometry {
@@ -114,8 +120,12 @@ fn main() -> Result<()> {
     };
 
     let mut process_time_stats = ProcessTimeStats {
-        total_time: std::time::Duration::new(0, 0),
+        total_voxel_time: std::time::Duration::new(0, 0),
+        total_cov_time: std::time::Duration::new(0, 0),
+        total_transform_time: std::time::Duration::new(0, 0),
+        total_knn_time: std::time::Duration::new(0, 0),
         total_gicp_time: std::time::Duration::new(0, 0),
+        total_time: std::time::Duration::new(0, 0),
         count: 0,
     };
 
@@ -197,40 +207,74 @@ fn main() -> Result<()> {
         let voxel_size = VOXEL_SIZE;
         let start = std::time::Instant::now();
         // let v_preprocessed_current_points = voxel_downsample(&preprocessed_current_points, voxel_size);
-        let v_preprocessed_current_points = gpu_voxel.voxel_downsample(
+        let (d_v_source, v_source_count, _) = gpu_voxel.voxel_downsample(
             &preprocessed_current_points, 
             preprocessed_current_points.nrows(), 
-            voxel_size
+            voxel_size,
+            false
         )?;
-        let v_target_pts = gpu_voxel.voxel_downsample(
+        let d_source_pts: CudaSlice<f32> = ctx.default_stream()
+            .clone_dtod(&d_v_source)?;
+
+        let (d_v_target_pts, d_v_target_count, v_target_pts) = gpu_voxel.voxel_downsample(
             &target_pts,
             target_pts.nrows(),
-            voxel_size
+            voxel_size,
+            true
         )?;
+        let d_target_pts: CudaSlice<f32> = ctx.default_stream()
+            .clone_dtod(&d_v_target_pts)?;
+
         let downsample_duration = start.elapsed();
-        println!("Debug: v_source points: {}, v_target points: {}", v_preprocessed_current_points.nrows(), v_target_pts.nrows());
-        println!("Voxel downsampling took {:?}", downsample_duration);
+        process_time_stats.total_voxel_time += downsample_duration;
+        println!("Debug: v_source points: {}, v_target points: {}", v_source_count, d_v_target_count);
+        // println!("Voxel downsampling took {:?}", downsample_duration);
         
         // Compute covariances for current frame points
-        let computed_source_covs = gpu_cov.compute_covariances(&v_preprocessed_current_points)
-            .expect("Failed to compute covariances on GPU");
-        let computed_target_covs = gpu_cov.compute_covariances(&v_target_pts)
-            .expect("Failed to compute covariances on GPU");
+        let start = std::time::Instant::now();
+        let (d_computed_source_covs, _) = gpu_cov.compute_covariances(
+            &d_source_pts, 
+            v_source_count,
+        false
+        ).expect("Failed to compute covariances on GPU");
+        let d_computed_source_covs_copy = ctx.default_stream()
+            .clone_dtod(&d_computed_source_covs)?;
+
+        let (d_computed_target_covs, computed_target_covs) = gpu_cov.compute_covariances(
+            &d_target_pts, 
+            d_v_target_count,
+            true
+        ).expect("Failed to compute covariances on GPU");
+        let d_computed_target_covs_copy = ctx.default_stream()
+            .clone_dtod(&d_computed_target_covs)?;
+        let cov_duration = start.elapsed();
+        process_time_stats.total_cov_time += cov_duration;
 
         let mut current_transform = predicted_pose.clone();
 
         let start = std::time::Instant::now();
         for i in 0..MAX_ITERATIONS {
             // Rotation source points and covariances by predicted pose
-            let transformed_source_pts = transform_points(&v_preprocessed_current_points, &current_transform);
-            let transformed_source_covs = transform_covariances(
-                &computed_source_covs,
+            // let transformed_source_pts = transform_points(&v_preprocessed_current_points, &current_transform);
+            let start = std::time::Instant::now();
+            let (d_transformed_source_pts, d_transformed_source_covs, transformed_source_pts, transformed_source_covs) = gpu_transform.apply(
+                &d_source_pts, 
+                &d_computed_source_covs_copy, 
+                v_source_count, 
                 &current_transform
-            );
+            ).context("Failed to transform source points on GPU")?;
+
+            let d_transformed_source_pts_copy = ctx.default_stream()
+                .clone_dtod(&d_transformed_source_pts)?;
+            let transform_duration = start.elapsed();
+            process_time_stats.total_transform_time += transform_duration;
 
             // let (indices, dists_sq) = gpu_knn.find_nearest(&preprocessed_current_points, &target_pts)
-            let (indices, dists_sq) = gpu_knn.find_nearest(&transformed_source_pts, &v_target_pts)
+            let start = std::time::Instant::now();
+            let (indices, dists_sq) = gpu_knn.find_nearest(&d_transformed_source_pts_copy, v_source_count, &d_target_pts, d_v_target_count)
                 .expect("Failed to perform GPU k-NN search");
+            let knn_duration = start.elapsed();
+            process_time_stats.total_knn_time += knn_duration;
 
             let max_dist2: f32 = 0.5;
 
@@ -418,6 +462,21 @@ fn main() -> Result<()> {
     println!("  Min Degree   : {:.4} deg", traj_record.min_degree  * 180.0 / std::f32::consts::PI);
     println!("  Max Degree   : {:.4} deg", traj_record.max_degree * 180.0 / std::f32::consts::PI);
     println!();
+    println!("Total frames processed: {}", process_time_stats.count);
+    print!("Average voxel time per frame: ");
+    println!("{:?}", process_time_stats.total_voxel_time / (process_time_stats.count as u32));
+    print!("Average covariance time per frame: ");
+    println!("{:?}", process_time_stats.total_cov_time / (process_time_stats.count as u32));
+    print!("Average transform time per frame: ");
+    println!("{:?}", process_time_stats.total_transform_time / (process_time_stats.count as u32));
+    print!("Average k-NN time per frame: ");
+    println!("{:?}", process_time_stats.total_knn_time / (process_time_stats.count as u32));
+    print!("Average GICP time per frame: ");
+    println!("{:?}", process_time_stats.total_gicp_time / (process_time_stats.count as u32));
+    print!("Average total time per frame: ");
+    println!("{:?}", process_time_stats.total_time / (process_time_stats.count as u32));
+    println!();
+
     print_parameters(&process_time_stats);
 
     let final_global_map = ndarray::concatenate(

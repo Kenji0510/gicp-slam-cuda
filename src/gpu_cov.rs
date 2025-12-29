@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{any, sync::Arc};
 use anyhow::{Result, Context};
-use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
+use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
 use nalgebra::{Matrix3, MatrixXx3, SymmetricEigen};
 use ndarray::Array2;
 use rayon::prelude::*;
@@ -55,29 +55,27 @@ impl CudaCovContext {
         Ok(())
     }
 
-    pub fn compute_covariances(
-        &mut self,
-        points: &Array2<f32>,
+    pub fn compute_covariances<'a>(
+        &'a mut self,
+        d_points: &CudaSlice<f32>,
+        num_points: usize,
+        is_target: bool,
     // ) -> Result<Vec<MatrixXx3<f64>>> {
-    ) -> Result<Vec<Matrix3<f64>>> {
-        let num_points = points.nrows();
+    ) -> Result<(CudaView<'a, f32>, Vec<Matrix3<f64>>)> {
         if num_points == 0 {
-            return Ok(vec![]);
+            anyhow::bail!("No points provided for covariance computation");
         }
 
-        Self::ensure_buffer(&self.stream, &mut self.buf_points, num_points * 3)?;
+        // Self::ensure_buffer(&self.stream, &mut self.buf_points, num_points * 3)?;
         Self::ensure_buffer(&self.stream, &mut self.buf_covs, num_points * 9)?;
 
-        let d_points = self.buf_points.as_mut().unwrap();
+        // let d_points = self.buf_points.as_mut().unwrap();
         let d_covs = self.buf_covs.as_mut().unwrap();
 
-        let points_slice = points.as_slice()
-            .context("Points not contiguous")?;
-
-        let mut d_points_view = d_points.slice_mut(0..num_points * 3);
+        // let mut d_points_view = d_points.slice_mut(0..num_points * 3);
         // let mut d_covs_view = d_covs.slice_mut(0..num_points * 9);
 
-        self.stream.memcpy_htod(points_slice, &mut d_points_view)?;
+        // self.stream.memcpy_htod(points_slice, &mut d_points_view)?;
 
         let cfg = LaunchConfig::for_num_elems(num_points as u32);
 
@@ -100,60 +98,25 @@ impl CudaCovContext {
         let d_covs = self.buf_covs.as_ref().unwrap();
         let d_covs_view = d_covs.slice(0..num_points * 9);
 
-        let raw_covs = self.stream.clone_dtoh(&d_covs_view)
+        if is_target {
+            let raw_covs = self.stream.clone_dtoh(&d_covs_view)
             .context("Failed DtoH copy for covariances")?;
 
-        // let mut result = Vec::with_capacity(num_points);
-        // for i in 0..num_points {
-        //     let offset = i * 9;
-        //     let cov = Matrix3::from_row_slice(&[
-        //         raw_covs[offset] as f64,     raw_covs[offset + 1] as f64, raw_covs[offset + 2] as f64,
-        //         raw_covs[offset + 3] as f64, raw_covs[offset + 4] as f64, raw_covs[offset + 5] as f64,
-        //         raw_covs[offset + 6] as f64, raw_covs[offset + 7] as f64, raw_covs[offset + 8] as f64,
-        //     ]);
-        //     result.push(cov);
-        // }
+            let result: Vec<Matrix3<f64>> = raw_covs
+                .par_chunks(9)
+                .map(|chunk| {
+                    Matrix3::new(
+                        chunk[0] as f64, chunk[1] as f64, chunk[2] as f64,
+                        chunk[3] as f64, chunk[4] as f64, chunk[5] as f64,
+                        chunk[6] as f64, chunk[7] as f64, chunk[8] as f64,
+                    )
+                })
+                .collect();
 
-        let regularized_covs: Vec<Matrix3<f64>> = raw_covs
-            .par_chunks(9) // 3x3=9要素ずつ処理
-            .map(|chunk| {
-                // f32 -> f64 へ変換
-                let mat = Matrix3::new(
-                    chunk[0] as f64, chunk[1] as f64, chunk[2] as f64,
-                    chunk[3] as f64, chunk[4] as f64, chunk[5] as f64,
-                    chunk[6] as f64, chunk[7] as f64, chunk[8] as f64,
-                );
-
-                // 固有値分解
-                let eigen = SymmetricEigen::new(mat);
-                let rot = eigen.eigenvectors;
-                let mut vals = eigen.eigenvalues;
-
-                // 固有値をソートして正規化 (平面性を強調)
-                // GICP Regularization: min_eigen = 1e-3
-                let mut pairs: Vec<(f64, usize)> = vals.iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, v)| (v, i))
-                    .collect();
-                // 昇順ソート
-                pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-                // 最小の固有値を潰して「平ら」にする
-                vals[pairs[0].1] = 1e-3; 
-                vals[pairs[1].1] = 1.0;
-                vals[pairs[2].1] = 1.0;
-
-                // 再構築: R * S * R^T
-                rot * Matrix3::from_diagonal(&vals) * rot.transpose()
-            })
-            .collect();
-        
-        // let elapsed = start.elapsed();
-        // println!("Regularizing covariances took: {:?}", elapsed);
-
-        Ok(regularized_covs)
-
+            Ok((d_covs_view, result))
+        } else {
+            Ok((d_covs_view, vec![]))
+        }
         // Ok(result)
     }
 }

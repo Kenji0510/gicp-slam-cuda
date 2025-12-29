@@ -26,27 +26,29 @@ impl CudaKnnContext {
 
     pub fn find_nearest(
         &self,
-        source_pts: &Array2<f32>,
-        target_pts: &Array2<f32>,
+        d_source_pts: &CudaSlice<f32>,
+        num_source: usize,
+        d_target_pts: &CudaSlice<f32>,
+        num_target: usize,
     ) -> Result<(Vec<i32>, Vec<f32>)> {
-        let num_source = source_pts.nrows();
-        let num_target = target_pts.nrows();
+        // let num_source = d_source_pts.nrows();
+        // let num_target = d_target_pts.nrows();
 
         if num_source == 0 || num_target == 0 {
             anyhow::bail!("Empty point cloud");
         }
 
-        let source_slice = source_pts.as_slice()
-            .context("Source not contignous")?;
-        let target_slice = target_pts.as_slice()
-            .context("Target not contignous")?;
+        // let source_slice = d_source_pts.as_slice()
+        //     .context("Source not contignous")?;
+        // let target_slice = d_target_pts.as_slice()
+        //     .context("Target not contignous")?;
 
-        let d_source: CudaSlice<f32> = self.stream
-            .clone_htod(source_slice)
-            .context("Failed HtoD copy (source)")?;
-        let d_target: CudaSlice<f32> = self.stream
-            .clone_htod(target_slice)
-            .context("Failed HtoD copy (target)")?;
+        // let d_source: CudaSlice<f32> = self.stream
+        //     .clone_htod(source_slice)
+        //     .context("Failed HtoD copy (source)")?;
+        // let d_target: CudaSlice<f32> = self.stream
+        //     .clone_htod(target_slice)
+        //     .context("Failed HtoD copy (target)")?;
         let mut d_indices: CudaSlice<i32> = self.stream
             .alloc_zeros(num_source)
             .context("Failed to alloc d_indices")?;
@@ -59,8 +61,8 @@ impl CudaKnnContext {
         // let start = std::time::Instant::now();
         unsafe {
             self.stream.launch_builder(&self.func)
-            .arg(&d_source)
-            .arg(&d_target)
+            .arg(d_source_pts)
+            .arg(d_target_pts)
             .arg(&(num_source as i32))
             .arg(&(num_target as i32))
             .arg(&mut d_indices)
