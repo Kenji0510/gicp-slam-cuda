@@ -4,7 +4,7 @@ use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 use anyhow::{Result, Context};
 use cudarc::driver::CudaContext;
 use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
-use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Matrix6, UnitQuaternion, Vector3, Vector6};
 use ndarray::{Array1, Array2, Axis, s};
 use ndarray_linalg::Solve;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -549,120 +549,83 @@ fn solve_gicp_step(
     // );
 
     // Rayonで並列化して H と b を計算し、最後にsumする
-    let (h_sum, b_sum) = (0..n).into_par_iter()
-        .map(|i| {
-            let p_s = Vector3::new(source_pts[[i,0]] as f64, source_pts[[i,1]] as f64, source_pts[[i,2]] as f64);
-            let p_t = Vector3::new(target_pts[[i,0]] as f64, target_pts[[i,1]] as f64, target_pts[[i,2]] as f64);
-            
-            // 1. マハラノビス距離の重み行列 (Information Matrix) Omega を計算
-            // C_sum = C_target + R * C_source * R^T
-            // let c_s_rot = r_curr * source_covs[i] * r_curr.transpose();
-            let c_sum = target_covs[i] + source_covs[i];
-            
-            // Omega = (C_sum)^-1
-            let omega = match c_sum.try_inverse() {
-                Some(inv) => inv,
-                None => return (Array2::<f64>::zeros((6, 6)), Array1::<f64>::zeros(6)),
-            };
+    // let (h_sum, b_sum) = (0..n).into_par_iter()
+    // ループの外でアロケーションなしで初期化（スタック領域）
+    let mut h_sum = Matrix6::<f64>::zeros();
+    let mut b_sum = Vector6::<f64>::zeros();
 
-            // 2. 誤差ベクトル
-            let error = p_t - p_s; // Target - Source
+    // イテレータではなく単純なforループの方がコンパイラ最適化がかかりやすい場合がある
+    for i in 0..n {
+        let p_s = Vector3::new(source_pts[[i,0]] as f64, source_pts[[i,1]] as f64, source_pts[[i,2]] as f64);
+        let p_t = Vector3::new(target_pts[[i,0]] as f64, target_pts[[i,1]] as f64, target_pts[[i,2]] as f64);
+        
+        // 1. マハラノビス距離の重み行列
+        let c_sum = target_covs[i] + source_covs[i];
+        
+        let omega = match c_sum.try_inverse() {
+            Some(inv) => inv,
+            None => continue, // 逆行列なしならスキップ
+        };
 
-            // 3. ヤコビアン J (6x3 ではなく 3x6 として扱い、J^T * Omega * J を計算)
-            // error = p_t - (R * p_s_original + t)
-            // 微小回転の線形化: - [p_s]x * w + v
-            // J = [Skew(p_s), -I] (※定義により符号は変わるが、ここでは標準的な構成で)
-            
-            // Jの各列ベクトル
-            // J_rot (p_s とのクロス積成分)
-            // [ 0,  z, -y]
-            // [-z,  0,  x]
-            // [ y, -x,  0]
-            let x = p_s.x; let y = p_s.y; let z = p_s.z;
-            
-            // 行列演算のために ndarray 形式に変換しつつ計算
-            // J^T * Omega * J を作るのが面倒なので、要素ごとに構築するアプローチ
-            
-            // J^T * Omega (6 x 3)
-            // J_rot^T * Omega
-            // J_trans^T * Omega
-            
-            // ここでは簡易的に、J^T * Omega * error と J^T * Omega * J を計算
-            
-            // Omega * error (3x1)
-            let w_e = omega * error;
-            
-            let mut local_b = Array1::<f64>::zeros(6);
-            
-            // Rotational part of b: (p_s x (Omega * error))
-            let cross = p_s.cross(&w_e);
-            local_b[0] = cross.x;
-            local_b[1] = cross.y;
-            local_b[2] = cross.z;
-            
-            // Translational part of b: Omega * error
-            local_b[3] = w_e.x;
-            local_b[4] = w_e.y;
-            local_b[5] = w_e.z;
+        // 2. 誤差ベクトル
+        let error = p_t - p_s;
 
-            // H = J^T * Omega * J の構築
-            let mut local_h = Array2::<f64>::zeros((6, 6));
-            
-            // Omega * J_rot (3x3) = Omega * Skew(p_s)
-            //   [ 0,  z, -y]
-            // S=[-z,  0,  x]
-            //   [ y, -x,  0]
-            // Col0 = Omega * [0, -z, y]^T
-            let s_col0 = Vector3::new(0.0, -z, y);
-            let s_col1 = Vector3::new(z, 0.0, -x);
-            let s_col2 = Vector3::new(-y, x, 0.0);
-            
-            let w_s0 = omega * s_col0;
-            let w_s1 = omega * s_col1;
-            let w_s2 = omega * s_col2;
+        // 3. J^T * Omega * error (bの一部)
+        let w_e = omega * error;
+        
+        // Rotational part of b: p_s x (Omega * error)
+        let cross = p_s.cross(&w_e);
+        
+        // b_sum に直接加算 (配列生成コストなし)
+        b_sum[0] += cross.x;
+        b_sum[1] += cross.y;
+        b_sum[2] += cross.z;
+        b_sum[3] += w_e.x;
+        b_sum[4] += w_e.y;
+        b_sum[5] += w_e.z;
 
-            // 左上: J_rot^T * Omega * J_rot
-            // (Skew(p_s)^T * [w_s0, w_s1, w_s2])
-            // Skew^T = -Skew なので、cross productを使って計算可能
-            // col0 = p_s x w_s0
-            let h00 = p_s.cross(&w_s0);
-            let h01 = p_s.cross(&w_s1);
-            let h02 = p_s.cross(&w_s2);
-            
-            local_h[[0,0]] = h00.x; local_h[[0,1]] = h01.x; local_h[[0,2]] = h02.x;
-            local_h[[1,0]] = h00.y; local_h[[1,1]] = h01.y; local_h[[1,2]] = h02.y;
-            local_h[[2,0]] = h00.z; local_h[[2,1]] = h01.z; local_h[[2,2]] = h02.z;
+        // 4. H行列の構築
+        // Omega * Skew(p_s) の計算
+        // S_col0 = [0, -z, y]^T なので Omega * S_col0 を計算
+        let x = p_s.x; let y = p_s.y; let z = p_s.z;
+        
+        let w_s0 = omega * Vector3::new(0.0, -z, y);
+        let w_s1 = omega * Vector3::new(z, 0.0, -x);
+        let w_s2 = omega * Vector3::new(-y, x, 0.0);
 
-            // 右下: J_trans^T * Omega * J_trans = Omega (そのもの)
-            local_h[[3,3]] = omega[(0,0)]; local_h[[3,4]] = omega[(0,1)]; local_h[[3,5]] = omega[(0,2)];
-            local_h[[4,3]] = omega[(1,0)]; local_h[[4,4]] = omega[(1,1)]; local_h[[4,5]] = omega[(1,2)];
-            local_h[[5,3]] = omega[(2,0)]; local_h[[5,4]] = omega[(2,1)]; local_h[[5,5]] = omega[(2,2)];
+        // 左上: Skew(p_s)^T * Omega * Skew(p_s) = p_s x (Omega * Skew_col)
+        let h00 = p_s.cross(&w_s0);
+        let h01 = p_s.cross(&w_s1);
+        let h02 = p_s.cross(&w_s2);
 
-            // 右上: J_rot^T * Omega * J_trans = Skew(p)^T * Omega
-            // 行列としては [w_s0, w_s1, w_s2]^T (転置されているため)
-            local_h[[0,3]] = w_s0.x; local_h[[0,4]] = w_s0.y; local_h[[0,5]] = w_s0.z;
-            local_h[[1,3]] = w_s1.x; local_h[[1,4]] = w_s1.y; local_h[[1,5]] = w_s1.z;
-            local_h[[2,3]] = w_s2.x; local_h[[2,4]] = w_s2.y; local_h[[2,5]] = w_s2.z;
+        // h_sum に直接加算
+        // 左上 (3x3)
+        h_sum[(0,0)] += h00.x; h_sum[(0,1)] += h01.x; h_sum[(0,2)] += h02.x;
+        h_sum[(1,0)] += h00.y; h_sum[(1,1)] += h01.y; h_sum[(1,2)] += h02.y;
+        h_sum[(2,0)] += h00.z; h_sum[(2,1)] += h01.z; h_sum[(2,2)] += h02.z;
 
-            // 左下: 対称行列なので右上の転置
-            local_h[[3,0]] = local_h[[0,3]]; local_h[[3,1]] = local_h[[1,3]]; local_h[[3,2]] = local_h[[2,3]];
-            local_h[[4,0]] = local_h[[0,4]]; local_h[[4,1]] = local_h[[1,4]]; local_h[[4,2]] = local_h[[2,4]];
-            local_h[[5,0]] = local_h[[0,5]]; local_h[[5,1]] = local_h[[1,5]]; local_h[[5,2]] = local_h[[2,5]];
+        // 右下 (3x3) = Omega
+        h_sum[(3,3)] += omega[(0,0)]; h_sum[(3,4)] += omega[(0,1)]; h_sum[(3,5)] += omega[(0,2)];
+        h_sum[(4,3)] += omega[(1,0)]; h_sum[(4,4)] += omega[(1,1)]; h_sum[(4,5)] += omega[(1,2)];
+        h_sum[(5,3)] += omega[(2,0)]; h_sum[(5,4)] += omega[(2,1)]; h_sum[(5,5)] += omega[(2,2)];
 
-            (local_h, local_b)
-        })
-        .reduce(
-            || (Array2::<f64>::zeros((6, 6)), Array1::<f64>::zeros(6)),
-            |mut a, b| {
-                a.0 = a.0 + b.0;
-                a.1 = a.1 + b.1;
-                a
-            }
-        );
+        // 右上 (3x3) = [w_s0, w_s1, w_s2]^T
+        h_sum[(0,3)] += w_s0.x; h_sum[(0,4)] += w_s0.y; h_sum[(0,5)] += w_s0.z;
+        h_sum[(1,3)] += w_s1.x; h_sum[(1,4)] += w_s1.y; h_sum[(1,5)] += w_s1.z;
+        h_sum[(2,3)] += w_s2.x; h_sum[(2,4)] += w_s2.y; h_sum[(2,5)] += w_s2.z;
 
+        // 左下 (3x3) = 右上の転置
+        h_sum[(3,0)] += w_s0.x; h_sum[(3,1)] += w_s1.x; h_sum[(3,2)] += w_s2.x;
+        h_sum[(4,0)] += w_s0.y; h_sum[(4,1)] += w_s1.y; h_sum[(4,2)] += w_s2.y;
+        h_sum[(5,0)] += w_s0.z; h_sum[(5,1)] += w_s1.z; h_sum[(5,2)] += w_s2.z;
+    };
+
+    let h_arr = Array2::from_shape_fn((6, 6), |(r, c)| h_sum[(r, c)]);
+    let b_arr = Array1::from_shape_fn(6, |i| b_sum[i]);
+    
     // H x = b を解く
     // ここは前のコードと同じ (solve or SVD fallback)
-    let delta = solve_linear_system_6x6(h_sum, b_sum)?;
+    let delta = solve_linear_system_6x6(h_arr, b_arr)?;
     
     Ok(delta)
 }
