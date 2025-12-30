@@ -11,18 +11,18 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "data/input/mid360/pcds/mid360-20251125-03";
-const IMU_FILE_PATH: &str = "data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json";
+const PCD_DIR: &str = "data/input/mid360/mid360-pointcloud2-bag-outside-station-to-campus/mid360";
+const IMU_FILE_PATH: &str = "data/input/mid360/mid360-pointcloud2-bag-outside-station-to-campus/mid360-imu/imu_data.json";
 const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/mid360_gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
 const VOXEL_PTX_PATH: &str = "src/kernels/voxel.ptx";
 
-const MIN_DIST: f32 = 0.0;
-const MAX_DIST: f32 = 20.0;
+const MIN_DIST: f32 = 0.7;
+const MAX_DIST: f32 = 35.0;
 const VOXEL_SIZE: f32 = 0.5;
-const MAX_ITERATIONS: usize = 5;
+const MAX_ITERATIONS: usize = 4;
 const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
