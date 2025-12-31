@@ -24,7 +24,7 @@ const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 35.0;
 const VOXEL_SIZE: f32 = 0.5;
-const MAX_ITERATIONS: usize = 5;
+const MAX_ITERATIONS: usize = 3;
 const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
@@ -434,7 +434,7 @@ fn main() -> Result<()> {
     print!("Average transform time per frame: ");
     println!("{:?}", process_time_stats.total_transform_time / (process_time_stats.count as u32));
     print!("Average k-NN time per frame: ");
-    println!("{:?}", process_time_stats.total_knn_time / (process_time_stats.count as u32));
+    println!("{:?}", process_time_stats.total_knn_time / (process_time_stats.count as u32) / 1000);
     print!("Average GICP time per frame: ");
     println!("{:?}", process_time_stats.total_gicp_time / (process_time_stats.count as u32));
     print!("Average total time per frame: ");
