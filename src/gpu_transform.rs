@@ -45,13 +45,13 @@ impl CudaTransformContext {
         Ok(())
     }
 
-    pub fn apply<'a>(
-        &'a mut self,
-        src_points: &CudaSlice<f32>,
-        src_covs: &CudaSlice<f32>,
+    pub fn apply(
+        &mut self,
+        src_points: &CudaView<f32>,
+        src_covs: &CudaView<f32>,
         num_points: usize,
         transform: &Array2<f32>,
-    ) -> Result<(CudaView<'a, f32>, CudaView<'a, f32>, Array2<f32>, Vec<Matrix3<f64>>)> {
+    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>)> {
         Self::ensure_buffer(&self.stream, &mut self.buf_out_points, num_points * 3)?;
         Self::ensure_buffer(&self.stream, &mut self.buf_out_covs, num_points * 9)?;
 
@@ -80,39 +80,9 @@ impl CudaTransformContext {
                 .context("Failed to launch transform kernel")?;
         }
 
-        let out_pts = self.buf_out_points.as_ref().unwrap();
-        let out_covs = self.buf_out_covs.as_ref().unwrap();
+        let out_pts = self.buf_out_points.as_ref().unwrap().clone();
+        let out_covs = self.buf_out_covs.as_ref().unwrap().clone();
 
-        // Copy d to host
-        let transformed_points_vec = self.stream.clone_dtoh(
-            &out_pts.slice(0..num_points * 3)
-        )?;
-        let transformed_covs_vec = self.stream.clone_dtoh(
-            &out_covs.slice(0..num_points * 9)
-        )?;
-
-        let transformed_points = Array2::from_shape_vec(
-            (num_points, 3), 
-            transformed_points_vec
-        ).context("Failed to reshape transformed points")?;
-
-        // Convert covariances to Vec<Matrix3<f64>>
-        let transformed_covs: Vec<Matrix3<f64>> = transformed_covs_vec
-            .par_chunks(9)
-            .map(|chunk| {
-                Matrix3::new(
-                    chunk[0] as f64, chunk[1] as f64, chunk[2] as f64,
-                    chunk[3] as f64, chunk[4] as f64, chunk[5] as f64,
-                    chunk[6] as f64, chunk[7] as f64, chunk[8] as f64,
-                )
-            })
-            .collect();
-
-        Ok((
-            out_pts.slice(0..num_points * 3),
-            out_covs.slice(0..num_points * 9),
-            transformed_points,
-            transformed_covs,
-        ))
+        Ok((out_pts, out_covs))
     }
 }

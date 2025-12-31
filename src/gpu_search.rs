@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use anyhow::{Result, Context};
-use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
+use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
 use ndarray::Array2;
 
 
@@ -26,11 +26,11 @@ impl CudaKnnContext {
 
     pub fn find_nearest(
         &self,
-        d_source_pts: &CudaSlice<f32>,
+        d_source_pts: &CudaView<f32>,
         num_source: usize,
-        d_target_pts: &CudaSlice<f32>,
+        d_target_pts: &CudaView<f32>,
         num_target: usize,
-    ) -> Result<(Vec<i32>, Vec<f32>)> {
+    ) -> Result<(CudaSlice<i32>, CudaSlice<f32>, Vec<i32>, Vec<f32>)> {
         // let num_source = d_source_pts.nrows();
         // let num_target = d_target_pts.nrows();
 
@@ -84,6 +84,8 @@ impl CudaKnnContext {
             .clone_dtoh(&d_distances)
             .context("Failed DtoH copy(distances")?;
 
-        Ok((indices, distances))
+        // Ok((indices, distances))
+
+        Ok((d_indices, d_distances, indices, distances))
     }
 }

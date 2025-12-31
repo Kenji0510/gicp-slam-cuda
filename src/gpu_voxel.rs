@@ -58,13 +58,12 @@ impl CudaVoxelContext {
         Ok(())
     }
 
-    pub fn voxel_downsample<'a>(
-        &'a mut self,
+    pub fn voxel_downsample(
+        &mut self,
         input_points: &Array2<f32>,
         num_points: usize,
         voxel_size: f32,
-        is_target: bool,
-    ) -> Result<(CudaView<'a, f32>, usize, Array2<f32>)> {
+    ) -> Result<(CudaSlice<f32>, usize)> {
         if num_points == 0 {
             anyhow::bail!("No input points for voxel downsampling");
         }
@@ -135,29 +134,12 @@ impl CudaVoxelContext {
         self.stream.synchronize()
             .context("Stream sync failed after voxel downsampling")?;
 
-        if is_target {
-            // Now we can safely create immutable borrows
-            let d_counter = self.buf_valid_count.as_ref().unwrap();
-            let valid_count_vec = self.stream.clone_dtoh(&d_counter.slice(0..1))?;
-            let valid_count = valid_count_vec[0] as usize;
+        let d_counter = self.buf_valid_count.as_ref().unwrap();
+        let valid_count = self.stream.clone_dtoh(&d_counter.slice(0..1))?[0] as usize;
 
-            let d_out_points = self.buf_out_points.as_ref().unwrap();
-            let out_pts_host = self.stream.clone_dtoh(
-                &d_out_points.slice(0..valid_count * 3)
-            )?;
+        let out_buf: CudaSlice<f32> = self.buf_out_points.as_ref().unwrap().clone();
 
-            let out_pts_array = Array2::from_shape_vec(
-                (valid_count, 3),
-                out_pts_host,
-            ).context("Failed to create output points array")?;
-
-            Ok((d_out_points.slice(0..valid_count * 3), valid_count, out_pts_array))
-        } else {
-            let d_counter = self.buf_valid_count.as_ref().unwrap();
-            let valid_count_vec = self.stream.clone_dtoh(&d_counter.slice(0..1))?;
-            let valid_count = valid_count_vec[0] as usize;
-
-            Ok((self.buf_out_points.as_ref().unwrap().slice(0..valid_count * 3), valid_count, Array2::<f32>::zeros((0,0))))
-        }
+        Ok((out_buf, valid_count))
+        
     }
 }

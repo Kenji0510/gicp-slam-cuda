@@ -3,7 +3,7 @@ use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 
 use anyhow::{Result, Context};
 use cudarc::driver::{CudaContext, CudaSlice};
-use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_search::CudaKnnContext, gpu_transform::CudaTransformContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
+use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_gicp::CudaGicpContext, gpu_search::CudaKnnContext, gpu_transform::CudaTransformContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use ndarray::{Array1, Array2, Axis, s};
 use ndarray_linalg::Solve;
@@ -19,9 +19,10 @@ const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
 const VOXEL_PTX_PATH: &str = "src/kernels/voxel.ptx";
 const TRANSFORM_PTX_PATH: &str = "src/kernels/transform.ptx";
+const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
-const MAX_DIST: f32 = 20.0;
+const MAX_DIST: f32 = 35.0;
 const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
 const LOCAL_MAP_SIZE: usize = 30;
@@ -72,6 +73,7 @@ struct ProcessTimeStats {
     total_voxel_time: std::time::Duration,
     total_cov_time: std::time::Duration,
     total_transform_time: std::time::Duration,
+    knn_time_per_frame: std::time::Duration,
     total_knn_time: std::time::Duration,
     total_gicp_time: std::time::Duration,
     total_time: std::time::Duration,
@@ -100,6 +102,7 @@ fn main() -> Result<()> {
     let mut gpu_cov = CudaCovContext::from_context(ctx.clone(), COV_PTX_PATH)?;
     let mut gpu_voxel = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
     let mut gpu_transform = CudaTransformContext::new(ctx.clone(), TRANSFORM_PTX_PATH)?;
+    let mut gpu_gicp = CudaGicpContext::from_context(ctx.clone(), GICP_PTX_PATH)?;
     println!("CUDA initialized.");
 
     let mut gicp_odometry = GicpOdometry {
@@ -123,6 +126,7 @@ fn main() -> Result<()> {
         total_voxel_time: std::time::Duration::new(0, 0),
         total_cov_time: std::time::Duration::new(0, 0),
         total_transform_time: std::time::Duration::new(0, 0),
+        knn_time_per_frame: std::time::Duration::new(0, 0),
         total_knn_time: std::time::Duration::new(0, 0),
         total_gicp_time: std::time::Duration::new(0, 0),
         total_time: std::time::Duration::new(0, 0),
@@ -206,24 +210,19 @@ fn main() -> Result<()> {
         // Voxel downsample both source and target point clouds
         let voxel_size = VOXEL_SIZE;
         let start = std::time::Instant::now();
-        // let v_preprocessed_current_points = voxel_downsample(&preprocessed_current_points, voxel_size);
-        let (d_v_source, v_source_count, _) = gpu_voxel.voxel_downsample(
+        let (d_v_source, v_source_count) = gpu_voxel.voxel_downsample(
             &preprocessed_current_points, 
             preprocessed_current_points.nrows(), 
-            voxel_size,
-            false
+            voxel_size
         )?;
-        let d_source_pts: CudaSlice<f32> = ctx.default_stream()
-            .clone_dtod(&d_v_source)?;
+        let d_v_source_view = d_v_source.slice(0..v_source_count * 3);
 
-        let (d_v_target_pts, d_v_target_count, v_target_pts) = gpu_voxel.voxel_downsample(
+        let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
             &target_pts,
             target_pts.nrows(),
-            voxel_size,
-            true
+            voxel_size
         )?;
-        let d_target_pts: CudaSlice<f32> = ctx.default_stream()
-            .clone_dtod(&d_v_target_pts)?;
+        let d_v_target_view = d_v_target.slice(0..d_v_target_count * 3);
 
         let downsample_duration = start.elapsed();
         process_time_stats.total_voxel_time += downsample_duration;
@@ -232,109 +231,72 @@ fn main() -> Result<()> {
         
         // Compute covariances for current frame points
         let start = std::time::Instant::now();
-        let (d_computed_source_covs, _) = gpu_cov.compute_covariances(
-            &d_source_pts, 
-            v_source_count,
-        false
+        let d_computed_source_covs = gpu_cov.compute_covariances(
+            &d_v_source_view, 
+            v_source_count
         ).expect("Failed to compute covariances on GPU");
-        let d_computed_source_covs_copy = ctx.default_stream()
-            .clone_dtod(&d_computed_source_covs)?;
+        let d_computed_source_covs_view = d_computed_source_covs.slice(0..v_source_count * 9);
 
-        let (d_computed_target_covs, computed_target_covs) = gpu_cov.compute_covariances(
-            &d_target_pts, 
-            d_v_target_count,
-            true
+        let d_computed_target_covs = gpu_cov.compute_covariances(
+            &d_v_target_view, 
+            d_v_target_count
         ).expect("Failed to compute covariances on GPU");
-        let d_computed_target_covs_copy = ctx.default_stream()
-            .clone_dtod(&d_computed_target_covs)?;
+        let d_computed_target_covs_view = d_computed_target_covs.slice(0..d_v_target_count * 9);
         let cov_duration = start.elapsed();
         process_time_stats.total_cov_time += cov_duration;
 
         let mut current_transform = predicted_pose.clone();
 
-        let start = std::time::Instant::now();
+        let gicp_iter_start = std::time::Instant::now();
         for i in 0..MAX_ITERATIONS {
             // Rotation source points and covariances by predicted pose
             // let transformed_source_pts = transform_points(&v_preprocessed_current_points, &current_transform);
             let start = std::time::Instant::now();
-            let (d_transformed_source_pts, d_transformed_source_covs, transformed_source_pts, transformed_source_covs) = gpu_transform.apply(
-                &d_source_pts, 
-                &d_computed_source_covs_copy, 
+            let (d_transformed_source_pts, d_transformed_source_covs) = gpu_transform.apply(
+                &d_v_source_view, 
+                &d_computed_source_covs_view, 
                 v_source_count, 
                 &current_transform
             ).context("Failed to transform source points on GPU")?;
+            let d_transformed_source_pts_view = d_transformed_source_pts.slice(0..v_source_count * 3);
+            let d_transformed_source_covs_view = d_transformed_source_covs.slice(0..v_source_count * 9);
 
-            let d_transformed_source_pts_copy = ctx.default_stream()
-                .clone_dtod(&d_transformed_source_pts)?;
+            // let d_transformed_source_pts_copy = ctx.default_stream()
+            //     .clone_dtod(&d_transformed_source_pts)?;
+            // let transform_duration = start.elapsed();
+            // let d_transformed_source_covs_copy = ctx.default_stream()
+            //     .clone_dtod(&d_transformed_source_covs)?;
             let transform_duration = start.elapsed();
             process_time_stats.total_transform_time += transform_duration;
 
             // let (indices, dists_sq) = gpu_knn.find_nearest(&preprocessed_current_points, &target_pts)
             let start = std::time::Instant::now();
-            let (indices, dists_sq) = gpu_knn.find_nearest(&d_transformed_source_pts_copy, v_source_count, &d_target_pts, d_v_target_count)
+            let (d_indices, d_dists_sq, indices, dists_sq) = gpu_knn.find_nearest(&d_transformed_source_pts_view, v_source_count, &d_v_target_view, d_v_target_count)
                 .expect("Failed to perform GPU k-NN search");
             let knn_duration = start.elapsed();
-            process_time_stats.total_knn_time += knn_duration;
+            // process_time_stats.total_knn_time += knn_duration;
+            process_time_stats.knn_time_per_frame += knn_duration;
 
             let max_dist2: f32 = 0.5;
 
-            let mut src_pts = Vec::<f32>::new();
-            let mut tgt_pts = Vec::<f32>::new();
-            let mut src_covs = Vec::new();
-            let mut tgt_covs = Vec::new();
-
-            for j in 0..transformed_source_pts.nrows() {
-                let idx = indices[j];
-                if idx < 0 {
-                    continue;
-                }
-                if dists_sq[j] > max_dist2 {
-                    continue;
-                }
-
-                let k = idx as usize;
-                if k >= v_target_pts.nrows() {
-                    continue;
-                }
-
-                src_pts.push(transformed_source_pts[[j, 0]]);
-                src_pts.push(transformed_source_pts[[j, 1]]);
-                src_pts.push(transformed_source_pts[[j, 2]]);
-
-                tgt_pts.push(v_target_pts[[k, 0]]);
-                tgt_pts.push(v_target_pts[[k, 1]]);
-                tgt_pts.push(v_target_pts[[k, 2]]);
-
-                src_covs.push(transformed_source_covs[j].clone());
-                tgt_covs.push(computed_target_covs[k].clone());
-            }
-
-            let n_valid = src_covs.len();
-            if n_valid < 20 {
-                println!("Too few valid correspondences: {}", n_valid);
-                break;
-            }
-
-            let src_arr = Array2::from_shape_vec((n_valid, 3), src_pts)
-                .expect("Failed to create source Array2");
-            let tgt_arr = Array2::from_shape_vec((n_valid, 3), tgt_pts)
-                .expect("Failed to create target Array2");
-
-            // GICP
-            let delta_t = solve_gicp_step(
-                &src_arr, 
-                &src_covs, 
-                &tgt_arr, 
-                &tgt_covs, 
-                // &current_transform
+            let (h_matrix, b_vector) = gpu_gicp.compute_gicp(
+                &d_transformed_source_pts_view, 
+                &d_transformed_source_covs_view, 
+                &d_v_target_view, 
+                &d_computed_target_covs_view, 
+                &d_indices, 
+                &d_dists_sq, 
+                max_dist2
             )?;
+
+            let delta_t = solve_linear_system_6x6(h_matrix, b_vector)?;
 
             current_transform = mat4_mul(&delta_t, &current_transform);
 
             // Check convergence (RMSE)
             let mut sum = 0.0f32;
             let mut cnt = 0usize;
-            for j in 0..transformed_source_pts.nrows() {
+            for j in 0..v_source_count {
                 let idx = indices[j];
                 if idx < 0 { continue; }
                 if dists_sq[j] > max_dist2 { continue; }
@@ -353,8 +315,10 @@ fn main() -> Result<()> {
                 break;
             }
         }
-        let gicp_duration = start.elapsed();
+        let gicp_duration = gicp_iter_start.elapsed();
         println!("GICP for frame {} took {:?}\n", i, gicp_duration);
+
+        process_time_stats.total_knn_time += process_time_stats.knn_time_per_frame / (MAX_ITERATIONS as u32);
 
         // Update odometry state
         let prev_pose = gicp_odometry.current_g_pose.clone();

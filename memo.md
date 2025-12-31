@@ -28,6 +28,13 @@ nvcc -ptx src/kernels/transform.cu -o src/kernels/transform.ptx \
     -std=c++17 \
     -O3 \
     --use_fast_math
+
+nvcc -ptx src/kernels/gicp.cu -o src/kernels/gicp.ptx \
+    --gpu-architecture=compute_86 \
+    --gpu-code=sm_86,sm_89,sm_90 \
+    -std=c++17 \
+    -O3 \
+    --use_fast_math
 ```
 
 # Logs
