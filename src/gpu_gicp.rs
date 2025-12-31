@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use anyhow::{Result, Context};
+use anyhow::{Context, Ok, Result};
 use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
 use ndarray::{Array1, Array2};
 
@@ -8,23 +8,43 @@ use ndarray::{Array1, Array2};
 pub struct CudaGicpContext {
     stream: Arc<CudaStream>,
     func: CudaFunction,
+
+    buf_h: Option<CudaSlice<f32>>,
+    buf_b: Option<CudaSlice<f32>>,
 }
 
 impl CudaGicpContext {
-    pub fn new(ptx_path: &str) -> Result<Self> {
-        let ctx = CudaContext::new(0)?;
-        Self::from_context(ctx, ptx_path)
+    pub fn new(ctx: Arc<CudaContext>, ptx_path: &str) -> Result<Self> {
+        let stream = ctx.default_stream();
+
+        let module = ctx.load_module(Ptx::from_file(ptx_path))
+            .context("Failed to load PTX module")?;
+
+        Ok(Self {
+            stream,
+            func: module.load_function("compute_gicp_linear_system")?,
+            buf_h: None,
+            buf_b: None,
+        })
     }
 
-    pub fn from_context(ctx: Arc<CudaContext>, ptx_path: &str) -> Result<Self> {
-        let stream = ctx.default_stream();
-        let module = ctx.load_module(Ptx::from_file(ptx_path))?;
-        let func = module.load_function("compute_gicp_linear_system")?;
-        Ok(Self { stream, func })
+    fn ensure_buffer<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
+        stream: &Arc<CudaStream>,
+        buffer: &mut Option<CudaSlice<T>>,
+        len: usize,
+    ) -> Result<()> {
+        let current = buffer.as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if current < len {
+            let new_len = (len as f32 * 1.0) as usize;
+            *buffer = Some(stream.alloc_zeros::<T>(new_len)?);
+        }
+        Ok(())
     }
 
     pub fn compute_gicp(
-        &self,
+        &mut self,
         d_source_pts: &CudaView<f32>,
         d_source_covs: &CudaView<f32>,
         d_target_pts: &CudaView<f32>,
@@ -40,12 +60,17 @@ impl CudaGicpContext {
             anyhow::bail!("Empty point cloud");
         }
         
-        let mut d_h: CudaSlice<f32> = self.stream
-            .alloc_zeros(36)
-            .context("Failed to alloc d_h")?;
-        let mut d_b: CudaSlice<f32> = self.stream
-            .alloc_zeros(6)
-            .context("Failed to alloc d_b")?;
+        // let mut d_h: CudaSlice<f32> = self.stream
+        //     .alloc_zeros(36)
+        //     .context("Failed to alloc d_h")?;
+        // let mut d_b: CudaSlice<f32> = self.stream
+        //     .alloc_zeros(6)
+        //     .context("Failed to alloc d_b")?;
+        Self::ensure_buffer(&self.stream, &mut self.buf_h, 36)?;
+        Self::ensure_buffer(&self.stream, &mut self.buf_b, 6)?;
+
+        let d_h = self.buf_h.as_mut().unwrap().clone();
+        let d_b = self.buf_b.as_mut().unwrap().clone();
 
         let cfg = LaunchConfig::for_num_elems(num_source as u32);
 
@@ -60,8 +85,8 @@ impl CudaGicpContext {
                 .arg(&(num_source as i32))
                 .arg(&(num_target as i32))
                 .arg(&max_dist_sq)
-                .arg(&mut d_h)
-                .arg(&mut d_b)
+                .arg(&d_h)
+                .arg(&d_b)
                 .launch(cfg)
                 .context("GICP Kernel launch failed")?;
         }

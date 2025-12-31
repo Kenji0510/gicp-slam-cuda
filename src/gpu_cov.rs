@@ -16,27 +16,17 @@ pub struct CudaCovContext {
 }
 
 impl CudaCovContext {
-    pub fn new(ptx_path: &str) -> Result<Self> {
-        let ctx = CudaContext::new(0)?;
-        Self::from_context(ctx, ptx_path)
-    }
-
-    pub fn from_context(
-        ctx: Arc<CudaContext>, 
-        ptx_path: &str,
-    ) -> Result<Self> {
+    pub fn new(ctx: Arc<CudaContext>, ptx_path: &str) -> Result<Self> {
         let stream = ctx.default_stream();
 
         let module = ctx.load_module(Ptx::from_file(ptx_path))
             .context("Failed to load PTX module")?;
-
-        let func = module.load_function("compute_covariance")
-            .context("Kernel function not found in PTX")?;
-
+        
+        
         Ok(Self {
-            ctx, 
+            ctx,
             stream,
-            func,
+            func: module.load_function("compute_covariance")?,
             buf_points: None,
             buf_covs: None,
         })

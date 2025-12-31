@@ -98,11 +98,11 @@ fn main() -> Result<()> {
     println!("Initializing CUDA...");
     let ctx = CudaContext::new(0)
         .context("Failed to create CUDA context")?;
-    let gpu_knn = CudaKnnContext::from_context(ctx.clone(), KNN_PTX_PATH)?;
-    let mut gpu_cov = CudaCovContext::from_context(ctx.clone(), COV_PTX_PATH)?;
+    let mut gpu_knn = CudaKnnContext::new(ctx.clone(), KNN_PTX_PATH)?;
+    let mut gpu_cov = CudaCovContext::new(ctx.clone(), COV_PTX_PATH)?;
     let mut gpu_voxel = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
     let mut gpu_transform = CudaTransformContext::new(ctx.clone(), TRANSFORM_PTX_PATH)?;
-    let mut gpu_gicp = CudaGicpContext::from_context(ctx.clone(), GICP_PTX_PATH)?;
+    let mut gpu_gicp = CudaGicpContext::new(ctx.clone(), GICP_PTX_PATH)?;
     println!("CUDA initialized.");
 
     let mut gicp_odometry = GicpOdometry {
