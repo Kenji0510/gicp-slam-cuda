@@ -31,6 +31,9 @@ const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
 const KEYFRAME_ANGLE_THRESHOLD: f32 = 0.1 * std::f32::consts::PI / 180.0; // radians
 
+const UPDATE_LOCAL_MAP_EVERY_N_FRAMES: usize = 3;
+const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 6;
+
 
 #[derive(Serialize)]
 struct PoseData {
@@ -145,6 +148,10 @@ fn main() -> Result<()> {
 
     let mut last_keyframe_pose = gicp_odometry.current_g_pose.clone();
 
+    let mut cached_d_v_target: Option<CudaSlice<f32>> = None;
+    let mut cached_d_v_target_count: usize = 0;
+    let mut cached_d_computed_target_covs: Option<CudaSlice<f32>> = None;
+
     for (i, pcd_path) in pcd_paths.iter().enumerate().skip(1) {
         // Load current pcd frame
         let pcd_points = load_pcd_xyzt(pcd_path.to_str().unwrap())
@@ -217,16 +224,32 @@ fn main() -> Result<()> {
         )?;
         let d_v_source_view = d_v_source.slice(0..v_source_count * 3);
 
-        let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
-            &target_pts,
-            target_pts.nrows(),
-            voxel_size
-        )?;
-        let d_v_target_view = d_v_target.slice(0..d_v_target_count * 3);
+        // let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
+        //     &target_pts,
+        //     target_pts.nrows(),
+        //     voxel_size
+        // )?;
+        // let d_v_target_view = d_v_target.slice(0..d_v_target_count * 3);
+
+        if i % UPDATE_LOCAL_MAP_EVERY_N_FRAMES == 0 || cached_d_v_target.is_none() {
+            let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
+                &target_pts,
+                target_pts.nrows(),
+                voxel_size
+            )?;
+            // let d_v_target_view = d_v_target.slice(0..d_v_target_count * 3);
+
+            cached_d_v_target = Some(d_v_target);
+            cached_d_v_target_count = d_v_target_count;
+        }
+
+        let d_v_target = cached_d_v_target.as_ref().unwrap();
+        let d_v_target_view = d_v_target.slice(0..cached_d_v_target_count * 3);
+        let d_v_target_count = cached_d_v_target_count;
 
         let downsample_duration = start.elapsed();
         process_time_stats.total_voxel_time += downsample_duration;
-        println!("Debug: v_source points: {}, v_target points: {}", v_source_count, d_v_target_count);
+        println!("Voxel downsampled source points: {} -> {}, target points: {} -> {}", preprocessed_current_points.nrows(), v_source_count, target_pts.nrows(), d_v_target_count);
         // println!("Voxel downsampling took {:?}", downsample_duration);
         
         // Compute covariances for current frame points
@@ -366,7 +389,8 @@ fn main() -> Result<()> {
         let is_keyframe = delta_dist > KEYFRAME_DIST_THRESHOLD || delta_angle > KEYFRAME_ANGLE_THRESHOLD;
 
         // if is_keyframe {
-        if i % 3 == 0 {
+        // if i % 3 == 0 {
+        if i % UPDATE_LOCAL_MAP_EVERY_N_FRAMES == 0 {
             // let delta_degree = delta_angle * 180.0 / std::f32::consts::PI;
             // println!("Frame {} is a keyframe (Δdist: {:.3} m, Δangle: {:.3} deg)", 
             //     i, delta_dist, delta_degree);
@@ -403,7 +427,8 @@ fn main() -> Result<()> {
                 points: aligned_current_points.clone(),
             });
 
-            if (i % 6) == 0 {
+            // if (i % 6) == 0 {
+            if (i % GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES) == 0 {
                 global_map_accumulator.push(aligned_current_points.clone());
             }
         }

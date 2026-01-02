@@ -88,13 +88,19 @@ impl CudaVoxelContext {
 
             let input_slice = input_points.as_slice()
                 .context("Input points not contiguous")?;
+            let start = std::time::Instant::now();
             self.stream.memcpy_htod(input_slice, &mut d_input_points.slice_mut(0..num_points * 3))?;
+            self.stream.synchronize()
+                .context("Stream sync failed after memcpy_htod")?;
+            let _duration = start.elapsed();
+            println!("Memcpy to device took: {:?}", _duration);
 
             self.stream.memcpy_htod(&[0i32], &mut d_counter.slice_mut(0..1))?;
             self.stream.memset_zeros(d_centroids)?;
             self.stream.memset_zeros(d_counts)?;
 
             let init_cfg = LaunchConfig::for_num_elems(table_size as u32);
+            let start = std::time::Instant::now();
             unsafe {
                 self.stream.launch_builder(&self.func_init)
                     .arg(&d_keys.slice(0..table_size))
@@ -129,10 +135,11 @@ impl CudaVoxelContext {
                     .launch(compact_cfg)
                     .context("Failed to launch compact_table kernel")?;
             }
-        } // All mutable borrows dropped here
-
-        self.stream.synchronize()
-            .context("Stream sync failed after voxel downsampling")?;
+            self.stream.synchronize()
+                .context("Stream sync failed after voxel downsampling")?;
+            let _duration = start.elapsed();
+            println!("Voxel downsampling kernels took: {:?}", _duration);
+        }
 
         let d_counter = self.buf_valid_count.as_ref().unwrap();
         let valid_count = self.stream.clone_dtoh(&d_counter.slice(0..1))?[0] as usize;
