@@ -4,6 +4,8 @@ use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, CudaView
 use ndarray::Array2;
 
 
+// const BLOCK_SIZE: u32 = 256;
+const BLOCK_SIZE: u32 = 128;
 
 pub struct CudaKnnContext {
     ctx: Arc<CudaContext>,
@@ -52,9 +54,6 @@ impl CudaKnnContext {
         d_target_pts: &CudaView<f32>,
         num_target: usize,
     ) -> Result<(CudaSlice<i32>, CudaSlice<f32>, Vec<i32>, Vec<f32>)> {
-        // let num_source = d_source_pts.nrows();
-        // let num_target = d_target_pts.nrows();
-
         if num_source == 0 || num_target == 0 {
             anyhow::bail!("Empty point cloud");
         }
@@ -62,27 +61,16 @@ impl CudaKnnContext {
         Self::ensure_buffer(&self.stream, &mut self.buf_indices, num_source)?;
         Self::ensure_buffer(&self.stream, &mut self.buf_dists, num_source)?;
 
-        // let source_slice = d_source_pts.as_slice()
-        //     .context("Source not contignous")?;
-        // let target_slice = d_target_pts.as_slice()
-        //     .context("Target not contignous")?;
-
-        // let d_source: CudaSlice<f32> = self.stream
-        //     .clone_htod(source_slice)
-        //     .context("Failed HtoD copy (source)")?;
-        // let d_target: CudaSlice<f32> = self.stream
-        //     .clone_htod(target_slice)
-        //     .context("Failed HtoD copy (target)")?;
-        // let mut d_indices: CudaSlice<i32> = self.stream
-        //     .alloc_zeros(num_source)
-        //     .context("Failed to alloc d_indices")?;
         let d_indices = self.buf_indices.as_mut().unwrap();
-        // let mut d_distances: CudaSlice<f32> = self.stream
-        //     .alloc_zeros(num_source)
-        //     .context("Failed to alloc d_distances")?;
         let d_distances = self.buf_dists.as_mut().unwrap();
 
-        let cfg = LaunchConfig::for_num_elems(num_source as u32);
+        // let cfg = LaunchConfig::for_num_elems(num_source as u32);
+        let grid_size = (num_source as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let cfg = LaunchConfig { 
+            grid_dim: (grid_size, 1, 1), 
+            block_dim: (BLOCK_SIZE, 1, 1), 
+            shared_mem_bytes: 0 
+        };
 
         // let start = std::time::Instant::now();
         unsafe {
