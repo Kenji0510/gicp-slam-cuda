@@ -11,8 +11,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "data/input/mid360/pcds/mid360-20251125-03";
-const IMU_FILE_PATH: &str = "data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json";
+const PCD_DIR: &str = "data/input/mid360/mid360-pointcloud2-bag-around-ritsumei-road/mid360";
+const IMU_FILE_PATH: &str = "data/input/mid360/mid360-pointcloud2-bag-around-ritsumei-road/mid360-imu/imu_data.json";
 const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/mid360_gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
@@ -25,7 +25,7 @@ const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 35.0;
 const VOXEL_SIZE: f32 = 0.25;
 const MAX_ITERATIONS: usize = 3;
-const LOCAL_MAP_SIZE: usize = 10;
+const LOCAL_MAP_SIZE: usize = 15;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
@@ -304,13 +304,6 @@ fn main() -> Result<()> {
                 .filter(|(idx, dist)| **idx >= 0 && **dist <= max_dist2)
                 .count();
             println!("GICP Iteration {}: Found {} valid correspondences", i, valid_pairs);
-
-            // 対応点が少なすぎる場合はGICPをスキップ（または広域探索へ移行）
-            if valid_pairs < 50 {
-                println!("⚠️ Danger: Too few correspondences! ({}) - Skipping GICP to avoid crash.", valid_pairs);
-                // 恒等変換行列を返す、あるいは予測値をそのまま採用するなど
-                continue; 
-            }
 
             let (h_matrix, b_vector) = gpu_gicp.compute_gicp(
                 &d_transformed_source_pts_view, 
