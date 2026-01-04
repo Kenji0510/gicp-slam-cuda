@@ -23,9 +23,9 @@ const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 35.0;
-const VOXEL_SIZE: f32 = 0.5;
+const VOXEL_SIZE: f32 = 0.25;
 const MAX_ITERATIONS: usize = 3;
-const LOCAL_MAP_SIZE: usize = 30;
+const LOCAL_MAP_SIZE: usize = 10;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
@@ -103,7 +103,8 @@ fn main() -> Result<()> {
         .context("Failed to create CUDA context")?;
     let mut gpu_knn = CudaKnnContext::new(ctx.clone(), KNN_PTX_PATH)?;
     let mut gpu_cov = CudaCovContext::new(ctx.clone(), COV_PTX_PATH)?;
-    let mut gpu_voxel = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
+    let mut gpu_voxel_source = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
+    let mut gpu_voxel_target = CudaVoxelContext::new(ctx.clone(), VOXEL_PTX_PATH)?;
     let mut gpu_transform = CudaTransformContext::new(ctx.clone(), TRANSFORM_PTX_PATH)?;
     let mut gpu_gicp = CudaGicpContext::new(ctx.clone(), GICP_PTX_PATH)?;
     println!("CUDA initialized.");
@@ -208,7 +209,8 @@ fn main() -> Result<()> {
         // let (target_pts, target_covs) = if gicp_odometry.local_map.is_empty() {
         let target_pts = if gicp_odometry.local_map.is_empty() {
             // (preprocessed_current_points.clone(), vec![])
-            preprocessed_current_points.clone()
+            // preprocessed_current_points.clone()
+            transform_points(&preprocessed_current_points, &gicp_odometry.current_g_pose)
         } else {
             // flatten_local_map(&gicp_odometry.local_map)?
             flatten_local_map(&gicp_odometry.local_map)?
@@ -217,22 +219,15 @@ fn main() -> Result<()> {
         // Voxel downsample both source and target point clouds
         let voxel_size = VOXEL_SIZE;
         let start = std::time::Instant::now();
-        let (d_v_source, v_source_count) = gpu_voxel.voxel_downsample(
+        let (d_v_source, v_source_count) = gpu_voxel_source.voxel_downsample(
             &preprocessed_current_points, 
             preprocessed_current_points.nrows(), 
             voxel_size
         )?;
         let d_v_source_view = d_v_source.slice(0..v_source_count * 3);
 
-        // let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
-        //     &target_pts,
-        //     target_pts.nrows(),
-        //     voxel_size
-        // )?;
-        // let d_v_target_view = d_v_target.slice(0..d_v_target_count * 3);
-
-        if i % UPDATE_LOCAL_MAP_EVERY_N_FRAMES == 0 || cached_d_v_target.is_none() {
-            let (d_v_target, d_v_target_count) = gpu_voxel.voxel_downsample(
+        if i % UPDATE_LOCAL_MAP_EVERY_N_FRAMES == 0 || cached_d_v_target.is_none() || i < 12 {
+            let (d_v_target, d_v_target_count) = gpu_voxel_target.voxel_downsample(
                 &target_pts,
                 target_pts.nrows(),
                 voxel_size
@@ -294,13 +289,28 @@ fn main() -> Result<()> {
 
             // let (indices, dists_sq) = gpu_knn.find_nearest(&preprocessed_current_points, &target_pts)
             let start = std::time::Instant::now();
-            let (d_indices, d_dists_sq, indices, dists_sq) = gpu_knn.find_nearest(&d_transformed_source_pts_view, v_source_count, &d_v_target_view, d_v_target_count)
-                .expect("Failed to perform GPU k-NN search");
+            let (d_indices, d_dists_sq, indices, dists_sq) = gpu_knn.find_nearest(
+                &d_transformed_source_pts_view, 
+                v_source_count, 
+                &gpu_voxel_target,
+            ).expect("Failed to perform GPU k-NN search");
             let knn_duration = start.elapsed();
             // process_time_stats.total_knn_time += knn_duration;
             process_time_stats.knn_time_per_frame += knn_duration;
 
-            let max_dist2: f32 = 0.5;
+            let max_dist2: f32 = 2.0;
+
+            let valid_pairs = indices.iter().zip(dists_sq.iter())
+                .filter(|(idx, dist)| **idx >= 0 && **dist <= max_dist2)
+                .count();
+            println!("GICP Iteration {}: Found {} valid correspondences", i, valid_pairs);
+
+            // 対応点が少なすぎる場合はGICPをスキップ（または広域探索へ移行）
+            if valid_pairs < 50 {
+                println!("⚠️ Danger: Too few correspondences! ({}) - Skipping GICP to avoid crash.", valid_pairs);
+                // 恒等変換行列を返す、あるいは予測値をそのまま採用するなど
+                continue; 
+            }
 
             let (h_matrix, b_vector) = gpu_gicp.compute_gicp(
                 &d_transformed_source_pts_view, 

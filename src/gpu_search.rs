@@ -3,6 +3,8 @@ use anyhow::{Result, Context};
 use cudarc::{driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg}, nvrtc::Ptx};
 use ndarray::Array2;
 
+use crate::gpu_voxel::CudaVoxelContext;
+
 
 // const BLOCK_SIZE: u32 = 256;
 const BLOCK_SIZE: u32 = 128;
@@ -51,15 +53,21 @@ impl CudaKnnContext {
         &mut self,
         d_source_pts: &CudaView<f32>,
         num_source: usize,
-        d_target_pts: &CudaView<f32>,
-        num_target: usize,
+        target_voxel_ctx: &CudaVoxelContext,
     ) -> Result<(CudaSlice<i32>, CudaSlice<f32>, Vec<i32>, Vec<f32>)> {
-        if num_source == 0 || num_target == 0 {
+        if num_source == 0 {
             anyhow::bail!("Empty point cloud");
         }
 
         Self::ensure_buffer(&self.stream, &mut self.buf_indices, num_source)?;
         Self::ensure_buffer(&self.stream, &mut self.buf_dists, num_source)?;
+
+        let d_table_keys = target_voxel_ctx.buf_table_keys.as_ref().unwrap();
+        let d_table_centroids = target_voxel_ctx.buf_table_centroids.as_ref().unwrap();
+        let d_table_counts = target_voxel_ctx.buf_table_counts.as_ref().unwrap();
+        let d_table_remap = target_voxel_ctx.buf_table_remap.as_ref().unwrap();
+        let table_size = target_voxel_ctx.table_size as i32;
+        let voxel_size = target_voxel_ctx.voxel_size;
 
         let d_indices = self.buf_indices.as_mut().unwrap();
         let d_distances = self.buf_dists.as_mut().unwrap();
@@ -76,9 +84,13 @@ impl CudaKnnContext {
         unsafe {
             self.stream.launch_builder(&self.func)
             .arg(d_source_pts)
-            .arg(d_target_pts)
             .arg(&(num_source as i32))
-            .arg(&(num_target as i32))
+            .arg(&voxel_size)
+            .arg(d_table_keys)
+            .arg(d_table_centroids)
+            .arg(d_table_counts)
+            .arg(d_table_remap)
+            .arg(&table_size)                
             .arg(d_indices)
             .arg(d_distances)
             .launch(cfg)

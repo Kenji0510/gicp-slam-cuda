@@ -31,7 +31,7 @@ __device__ inline void add_to_global(
     int* table_counts,
     int table_size
 ) {
-    int table_idx = hash_key & table_size;
+    int table_idx = hash_key % table_size;
 
     for (int i = 0; i < 1000; ++i) {
         unsigned long long old_key = atomicCAS(
@@ -121,10 +121,28 @@ extern "C" __global__ void insert_points(
     }
 }
 
+extern "C" __global__ void average_table(
+    float* __restrict__ table_centroids,
+    const int* __restrict__ table_counts,
+    int table_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= table_size) return;
+
+    int cnt = table_counts[idx];
+    if (cnt > 1) {
+        float inv_cnt = 1.0f / (float)cnt;
+        table_centroids[idx * 3 + 0] *= inv_cnt;
+        table_centroids[idx * 3 + 1] *= inv_cnt;
+        table_centroids[idx * 3 + 2] *= inv_cnt;
+    }
+}
+
 extern "C" __global__ void compact_voxels(
     const unsigned long long* __restrict__ table_keys,
     const float* __restrict__ table_centroids,
     const int* __restrict__ table_counts,
+    int* __restrict__ table_remap,
     int table_size,
     float* __restrict__ out_points,
     int* __restrict__ out_count
@@ -133,24 +151,28 @@ extern "C" __global__ void compact_voxels(
     if (idx >= table_size) return;
 
     if (table_keys[idx] != EMPTY_KEY && table_counts[idx] > 0) {
-        int cnt = table_counts[idx];
+        // int cnt = table_counts[idx];
         float sx = table_centroids[idx * 3 + 0];
         float sy = table_centroids[idx * 3 + 1];
         float sz = table_centroids[idx * 3 + 2];
 
         int write_idx = atomicAdd(out_count, 1);
 
-        out_points[write_idx * 3 + 0] = sx / cnt;;
-        out_points[write_idx * 3 + 1] = sy / cnt;
-        out_points[write_idx * 3 + 2] = sz / cnt;
+        out_points[write_idx * 3 + 0] = sx;
+        out_points[write_idx * 3 + 1] = sy;
+        out_points[write_idx * 3 + 2] = sz;
+
+        table_remap[idx] = write_idx;
     }
 }
 
 extern "C" __global__ void init_table(
     unsigned long long* __restrict__ table_keys,
+    int* __restrict__ table_remap,
     int table_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= table_size) return;
     table_keys[idx] = EMPTY_KEY;
+    table_remap[idx] = -1;
 }
