@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 pub struct CudaCovContext {
     ctx: Arc<CudaContext>,
-    stream: Arc<CudaStream>,
+    pub stream: Arc<CudaStream>,
     func: CudaFunction,
 
     buf_points: Option<CudaSlice<f32>>,
@@ -70,8 +70,8 @@ impl CudaCovContext {
                 .context("Kernel launch failed")?;
         }
 
-        // self.stream.synchronize()
-        //     .context("Stream sync failed")?;
+        self.stream.synchronize()
+            .context("Stream sync failed")?;
 
         // let _duration = start.elapsed();
         // println!("Calculating covariance took: {:?}", _duration);

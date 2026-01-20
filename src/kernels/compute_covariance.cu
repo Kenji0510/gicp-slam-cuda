@@ -63,6 +63,20 @@ __device__ void eigen_decomposition(float A[3][3], float evecs[3][3], float eval
     evals[2] = A[2][2];
 }
 
+__device__ void recompute_max_k(
+    float* dists,
+    float* dmax, int* imax)
+{
+    float dm = dists[0];
+    int im = 0;
+    for (int t = 1; t < K; ++t) {
+        float v = dists[t];
+        if (v > dm) { dm = v; im = t; }
+    }
+    *dmax = dm;
+    *imax = im;
+}
+
 extern "C" __global__ void compute_covariance(
     const float* __restrict__ points,
     int num_points,
@@ -84,6 +98,11 @@ extern "C" __global__ void compute_covariance(
         neighbor_indices[i] = -1;
     }
 
+    float dmax = neighbor_dists[0];
+    int imax = 0;
+
+    recompute_max_k(neighbor_dists, &dmax, &imax);
+
     for (int j = 0; j < num_points; ++j) {
         if (idx == j) continue;
 
@@ -96,15 +115,11 @@ extern "C" __global__ void compute_covariance(
         float dz = pz - tz;
         float d2 = dx*dx + dy*dy + dz*dz;
 
-        if (d2 < neighbor_dists[K - 1]) {
-            int insert_pos = K - 1;
-            while (insert_pos > 0 && d2 < neighbor_dists[insert_pos - 1]) {
-                neighbor_dists[insert_pos] = neighbor_dists[insert_pos - 1];
-                neighbor_indices[insert_pos] = neighbor_indices[insert_pos - 1];
-                insert_pos--;
-            }
-            neighbor_dists[insert_pos] = d2;
-            neighbor_indices[insert_pos] = j;
+        if (d2 < dmax) {
+            neighbor_dists[imax] = d2;
+            neighbor_indices[imax] = j;
+
+            recompute_max_k(neighbor_dists, &dmax, &imax);
         }
     }
 

@@ -80,6 +80,9 @@ impl CudaTransformContext {
                 .context("Failed to launch transform kernel")?;
         }
 
+        self.stream.synchronize()
+            .context("Failed to synchronize stream after transform")?;
+
         let out_pts = self.buf_out_points.as_ref().unwrap().clone();
         let out_covs = self.buf_out_covs.as_ref().unwrap().clone();
 

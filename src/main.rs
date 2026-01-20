@@ -259,6 +259,9 @@ fn main() -> Result<()> {
             &d_v_target_view, 
             d_v_target_count
         ).expect("Failed to compute covariances on GPU");
+        // For Debug
+        // gpu_cov.stream.synchronize()?;
+
         let d_computed_target_covs_view = d_computed_target_covs.slice(0..d_v_target_count * 9);
         let cov_duration = start.elapsed();
         process_time_stats.total_cov_time += cov_duration;
