@@ -57,7 +57,7 @@ extern "C" __global__ void find_nearest_neighbor(
     float best_dist_sq = 1.0e30f;
     int best_table_idx = -1;
 
-    int search_range = 1;
+    int search_range = 3;
 
     for (int dz = -search_range; dz <= search_range; ++dz) {
         for (int dy = -search_range; dy <= search_range; ++dy) {

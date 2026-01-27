@@ -1,4 +1,4 @@
-#define K 12
+#define K 8
 
 __device__ void eigen_decomposition(float A[3][3], float evecs[3][3], float evals[3]) {
     // 単位行列で初期化

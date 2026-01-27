@@ -11,9 +11,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "data/input/mid360/mid360-pointcloud2-bag-around-ritsumei-road/mid360";
-const IMU_FILE_PATH: &str = "data/input/mid360/mid360-pointcloud2-bag-around-ritsumei-road/mid360-imu/imu_data.json";
-const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/mid360_gicp_global_map.pcd";
+const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/pcd";
+const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/imu/imu_data.json";
+const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/avia_gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
@@ -23,16 +23,16 @@ const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 35.0;
-const VOXEL_SIZE: f32 = 0.25;
-const MAX_ITERATIONS: usize = 3;
-const LOCAL_MAP_SIZE: usize = 15;
+const VOXEL_SIZE: f32 = 0.5;
+const MAX_ITERATIONS: usize = 5;
+const LOCAL_MAP_SIZE: usize = 120;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
 const KEYFRAME_ANGLE_THRESHOLD: f32 = 0.1 * std::f32::consts::PI / 180.0; // radians
 
-const UPDATE_LOCAL_MAP_EVERY_N_FRAMES: usize = 3;
-const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 6;
+const UPDATE_LOCAL_MAP_EVERY_N_FRAMES: usize = 2;
+const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 2;
 
 
 #[derive(Serialize)]
@@ -245,6 +245,10 @@ fn main() -> Result<()> {
         let downsample_duration = start.elapsed();
         process_time_stats.total_voxel_time += downsample_duration;
         println!("Voxel downsampled source points: {} -> {}, target points: {} -> {}", preprocessed_current_points.nrows(), v_source_count, target_pts.nrows(), d_v_target_count);
+        if preprocessed_current_points.nrows() < 5000 {
+            println!("  Warning: Source point count after voxel downsampling is low: {}", v_source_count);
+            continue;
+        }
         // println!("Voxel downsampling took {:?}", downsample_duration);
         
         // Compute covariances for current frame points
@@ -479,7 +483,7 @@ fn main() -> Result<()> {
     &global_map_accumulator.iter().map(|arr| arr.view()).collect::<Vec<_>>()
     ).context("Failed to concatenate global map")?;
 
-    let voxel_size = 0.1;
+    let voxel_size = 0.25;
     let v_final_global_map = voxel_downsample(&final_global_map, voxel_size);
     let final_pcd = array2_to_pcd(&v_final_global_map);
     save_pcd_xyz(&final_pcd, FINAL_MAP_SAVE_PATH)
