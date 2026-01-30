@@ -11,8 +11,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/mid360/pcd";
-const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/mid360/imu/imu_data.json";
+const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/pcd";
+const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/imu/imu_data.json";
 const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/avia_gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
@@ -22,10 +22,10 @@ const TRANSFORM_PTX_PATH: &str = "src/kernels/transform.ptx";
 const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
-const MAX_DIST: f32 = 50.0;
+const MAX_DIST: f32 = 60.0;
 const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
-const LOCAL_MAP_SIZE: usize = 30;
+const LOCAL_MAP_SIZE: usize = 60;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
@@ -187,6 +187,7 @@ fn main() -> Result<()> {
             min_timestamp  / 1_000_000_000.0, 
             max_timestamp / 1_000_000_000.0
         );
+        println!("aaaa");
 
         // Preprocess point cloud: deskewing and filtering
         let preprocessed_current_points = preprocess_point_cloud(

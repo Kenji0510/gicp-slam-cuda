@@ -50,7 +50,7 @@ pub fn predict_pose_by_imu(
     // let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
     //     .filter(|s| s.timestamp_sec > start_time && s.timestamp_sec <= end_time)
     //     .collect();
-
+    
     let (start_imu_idx, end_imu_idx) = get_imu_range(imu_samples, start_time, end_time);
     let relevant_samples: Vec<&ImuSample> = imu_samples[start_imu_idx..end_imu_idx].iter().collect();
 
