@@ -4,6 +4,22 @@ use ndarray::Array2;
 use crate::load_files::ImuSample;
 
 
+pub fn get_imu_range(
+    imu_samples: &[ImuSample],
+    min_timestamp: f64,
+    max_timestamp: f64,
+) -> (usize, usize) {
+    let start_dx = imu_samples.iter()
+        .position(|s| s.timestamp_sec >= min_timestamp)
+        .unwrap_or(0);
+
+    let end_idx = imu_samples.iter()
+        .position(|s| s.timestamp_sec > max_timestamp)
+        .unwrap_or(imu_samples.len() - 1);
+
+    (start_dx, end_idx)
+}
+
 pub fn predict_pose_by_imu(
     start_pose_mat: &Array2<f32>, // 前回のGICP収束後の姿勢 (4x4)
     start_vel: &Vector3<f64>,     // 前回の速度
@@ -31,11 +47,15 @@ pub fn predict_pose_by_imu(
 
     // 2. 指定範囲のIMUデータを抽出
     // 前回の終わりから今回の終わりまでを含めるため少しバッファを持たせるか、厳密にフィルタリングする
-    let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
-        .filter(|s| s.timestamp_sec > start_time && s.timestamp_sec <= end_time)
-        .collect();
+    // let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
+    //     .filter(|s| s.timestamp_sec > start_time && s.timestamp_sec <= end_time)
+    //     .collect();
 
-    let mut last_t = start_time;
+    let (start_imu_idx, end_imu_idx) = get_imu_range(imu_samples, start_time, end_time);
+    let relevant_samples: Vec<&ImuSample> = imu_samples[start_imu_idx..end_imu_idx].iter().collect();
+
+    // let mut last_t = start_time;
+    let mut last_t = imu_samples[start_imu_idx - 1].timestamp_sec;
 
     // 3. 積分 (Dead Reckoning)
     for sample in relevant_samples {
@@ -99,18 +119,21 @@ pub fn build_rotation_trajectory(
     let mut current_rotation = UnitQuaternion::identity();
     
     // 範囲内のデータのみ抽出
-    let buffer_time = 0.01; // 10ms余裕を持たせる
-    let search_start = start_time - buffer_time;
-    let search_end = end_time + buffer_time;
+    // let buffer_time = 0.01; // 10ms余裕を持たせる
+    // let search_start = start_time - buffer_time;
+    // let search_end = end_time + buffer_time;
 
-    let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
-        .filter(|s| s.timestamp_sec >= search_start && s.timestamp_sec <= search_end)
-        .collect();
+    // let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
+    //     .filter(|s| s.timestamp_sec >= search_start && s.timestamp_sec <= search_end)
+    //     .collect();
+
+    let (start_imu_idx, end_imu_idx) = get_imu_range(imu_samples, start_time, end_time);
+    let relevant_samples: Vec<&ImuSample> = imu_samples[start_imu_idx..end_imu_idx].iter().collect();
 
     // 最初の基準点
-    trajectory.push((search_start, current_rotation));
+    trajectory.push((imu_samples[start_imu_idx].timestamp_sec, current_rotation));
 
-    let mut last_time = search_start;
+    let mut last_time = imu_samples[start_imu_idx - 1].timestamp_sec;
 
     for sample in relevant_samples {
         let dt = sample.timestamp_sec - last_time;

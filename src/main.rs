@@ -11,8 +11,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/pcd";
-const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/imu/imu_data.json";
+const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/mid360/pcd";
+const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/mid360/imu/imu_data.json";
 const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/avia_gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
@@ -22,17 +22,17 @@ const TRANSFORM_PTX_PATH: &str = "src/kernels/transform.ptx";
 const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
-const MAX_DIST: f32 = 35.0;
+const MAX_DIST: f32 = 50.0;
 const VOXEL_SIZE: f32 = 0.5;
 const MAX_ITERATIONS: usize = 5;
-const LOCAL_MAP_SIZE: usize = 120;
+const LOCAL_MAP_SIZE: usize = 30;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
 const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
 const KEYFRAME_ANGLE_THRESHOLD: f32 = 0.1 * std::f32::consts::PI / 180.0; // radians
 
 const UPDATE_LOCAL_MAP_EVERY_N_FRAMES: usize = 2;
-const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 2;
+const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 4;
 
 
 #[derive(Serialize)]
@@ -162,6 +162,9 @@ fn main() -> Result<()> {
         let min_timestamp = pcd_points.iter()
             .map(|p| p.timestamp)
             .fold(f64::INFINITY, f64::min);
+        let max_timestamp = pcd_points.iter()
+            .map(|p| p.timestamp)
+            .fold(f64::NEG_INFINITY, f64::max);
 
         // Transform the min_timestamp to seconds
         let current_frame_timestamp = min_timestamp / 1_000_000_000.0;
@@ -179,23 +182,10 @@ fn main() -> Result<()> {
             &imu_data
         );
 
-        // let min_timestamp = pcd_points.iter()
-        //     .map(|p| p.timestamp)
-        //     .fold(f64::INFINITY, f64::min);
-        let max_timestamp = pcd_points.iter()
-            .map(|p| p.timestamp)
-            .fold(f64::NEG_INFINITY, f64::max);
-
-        // Build rotation trajectory from IMU data
-        // let rotation_traj = build_rotation_trajectory(
-        //     &imu_data, 
-        //     gicp_odometry.last_timestamp, 
-        //     current_frame_timestamp
-        // );
         let rotation_traj = build_rotation_trajectory(
             &imu_data, 
-            min_timestamp, 
-            max_timestamp
+            min_timestamp  / 1_000_000_000.0, 
+            max_timestamp / 1_000_000_000.0
         );
 
         // Preprocess point cloud: deskewing and filtering
@@ -483,7 +473,7 @@ fn main() -> Result<()> {
     &global_map_accumulator.iter().map(|arr| arr.view()).collect::<Vec<_>>()
     ).context("Failed to concatenate global map")?;
 
-    let voxel_size = 0.25;
+    let voxel_size = 0.5;
     let v_final_global_map = voxel_downsample(&final_global_map, voxel_size);
     let final_pcd = array2_to_pcd(&v_final_global_map);
     save_pcd_xyz(&final_pcd, FINAL_MAP_SAVE_PATH)

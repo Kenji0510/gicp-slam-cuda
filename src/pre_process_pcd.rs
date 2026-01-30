@@ -14,7 +14,7 @@ pub fn preprocess_point_cloud(
     let mut valid_points_flat = Vec::with_capacity(n_points * 3);
 
     // 1. このフレームの基準となる回転を取得（通常は先頭の点の時刻）
-    let frame_start_time = points[0].timestamp;
+    let frame_start_time = points[0].timestamp / 1_000_000_000.0; // ナノ秒→秒変換
     let start_rotation = get_rotation_at_time(trajectory, frame_start_time);
     
     // 基準回転の逆行列を事前に計算（R_start^-1）
