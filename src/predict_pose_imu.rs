@@ -26,6 +26,7 @@ pub fn predict_pose_by_imu(
     start_time: f64,              // 前回のタイムスタンプ
     end_time: f64,                // 今回のタイムスタンプ
     imu_samples: &[ImuSample],    // 全IMUデータ
+    imu_to_lidar: &UnitQuaternion<f64>, // R_L_I: IMU座標系 → LiDAR座標系の回転
 ) -> (Array2<f32>, Vector3<f64>) { // (予測姿勢, 予測速度)
     
     // 1. Array2<f32> から nalgebra の型 (Isometry3/UnitQuaternion) に変換
@@ -54,8 +55,12 @@ pub fn predict_pose_by_imu(
     let (start_imu_idx, end_imu_idx) = get_imu_range(imu_samples, start_time, end_time);
     let relevant_samples: Vec<&ImuSample> = imu_samples[start_imu_idx..end_imu_idx].iter().collect();
 
-    // let mut last_t = start_time;
-    let mut last_t = imu_samples[start_imu_idx - 1].timestamp_sec;
+    // 前サンプルが存在すればその時刻、なければ start_time を基準にする
+    let mut last_t = if start_imu_idx > 0 {
+        imu_samples[start_imu_idx - 1].timestamp_sec
+    } else {
+        start_time
+    };
 
     // 3. 積分 (Dead Reckoning)
     for sample in relevant_samples {
@@ -63,10 +68,12 @@ pub fn predict_pose_by_imu(
         if dt <= 1e-9 { continue; }
 
         // --- 回転の更新 (Gyro) ---
+        // IMU座標系 → LiDAR座標系へ変換: ω_L = R_L_I * ω_I
         let wx = sample.gyro[0] as f64;
         let wy = sample.gyro[1] as f64;
         let wz = sample.gyro[2] as f64;
-        let omega = Vector3::new(wx, wy, wz);
+        let omega_imu = Vector3::new(wx, wy, wz);
+        let omega = imu_to_lidar * omega_imu;
         
         let angle = omega.norm() * dt;
         let axis = if angle < 1e-9 { Vector3::x_axis() } else { Unit::new_normalize(omega) };
@@ -76,10 +83,12 @@ pub fn predict_pose_by_imu(
         rotation.renormalize();
 
         // --- 速度・位置の更新 (Accel) ---
+        // IMU座標系 → LiDAR座標系へ変換: a_L = R_L_I * a_I
         let ax = sample.linear_acceleration[0] as f64;
         let ay = sample.linear_acceleration[1] as f64;
         let az = sample.linear_acceleration[2] as f64;
-        let acc_local = Vector3::new(ax, ay, az);
+        let acc_imu = Vector3::new(ax, ay, az);
+        let acc_local = imu_to_lidar * acc_imu;
 
         // ローカル加速度をグローバルへ変換
         let acc_global = rotation * acc_local;
@@ -114,6 +123,7 @@ pub fn build_rotation_trajectory(
     imu_samples: &[ImuSample], 
     start_time: f64,
     end_time: f64,
+    imu_to_lidar: &UnitQuaternion<f64>, // R_L_I: IMU座標系 → LiDAR座標系の回転
 ) -> RotationTrajectory {
     let mut trajectory = Vec::new();
     let mut current_rotation = UnitQuaternion::identity();
@@ -133,7 +143,12 @@ pub fn build_rotation_trajectory(
     // 最初の基準点
     trajectory.push((imu_samples[start_imu_idx].timestamp_sec, current_rotation));
 
-    let mut last_time = imu_samples[start_imu_idx - 1].timestamp_sec;
+    // 前サンプルが存在すればその時刻、なければ start_time を基準にする
+    let mut last_time = if start_imu_idx > 0 {
+        imu_samples[start_imu_idx - 1].timestamp_sec
+    } else {
+        start_time
+    };
 
     for sample in relevant_samples {
         let dt = sample.timestamp_sec - last_time;
@@ -145,7 +160,9 @@ pub fn build_rotation_trajectory(
         let wx = sample.gyro[0] as f64;
         let wy = sample.gyro[1] as f64;
         let wz = sample.gyro[2] as f64;
-        let omega = Vector3::new(wx, wy, wz);
+        // IMU座標系 → LiDAR座標系へ変換: ω_L = R_L_I * ω_I
+        let omega_imu = Vector3::new(wx, wy, wz);
+        let omega = imu_to_lidar * omega_imu;
 
         // 微小回転を今の回転に積み上げる
         let angle_axis = omega * dt;

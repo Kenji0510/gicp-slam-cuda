@@ -4,16 +4,16 @@ use std::{collections::VecDeque, f32::{INFINITY, NEG_INFINITY}};
 use anyhow::{Result, Context};
 use cudarc::driver::{CudaContext, CudaSlice};
 use gicp_slam_cuda::{gpu_cov::CudaCovContext, gpu_gicp::CudaGicpContext, gpu_search::CudaKnnContext, gpu_transform::CudaTransformContext, gpu_voxel::CudaVoxelContext, load_files::{load_and_flatten_imu_json, load_pcd_files}, operate_pcd_file::{load_pcd_xyzt, save_pcd_xyz}, pre_process_pcd::{self, preprocess_point_cloud}, predict_pose_imu::{self, build_rotation_trajectory, predict_pose_by_imu}};
-use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use nalgebra::{Quaternion, UnitQuaternion, Matrix3, Vector3};
 use ndarray::{Array1, Array2, Axis, s};
 use ndarray_linalg::Solve;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 
-const PCD_DIR: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/pcd";
-const IMU_FILE_PATH: &str = "/home/kenji/workspace/rust/r2r-subscriber-for-avia/data/output/avia/imu/imu_data.json";
-const FINAL_MAP_SAVE_PATH: &str = "data/output/final_map/avia_gicp_global_map.pcd";
+const PCD_DIR: &str = "data/input/park08/pcd";
+const IMU_FILE_PATH: &str = "data/input/park08/imu/imu_data.json";
+const FINAL_MAP_SAVE_PATH: &str = "data/output/gicp_global_map.pcd";
 
 const KNN_PTX_PATH: &str = "src/kernels/search.ptx";
 const COV_PTX_PATH: &str = "src/kernels/compute_covariance.ptx";
@@ -23,8 +23,8 @@ const GICP_PTX_PATH: &str = "src/kernels/gicp.ptx";
 
 const MIN_DIST: f32 = 0.0;
 const MAX_DIST: f32 = 60.0;
-const VOXEL_SIZE: f32 = 0.5;
-const MAX_ITERATIONS: usize = 5;
+const VOXEL_SIZE: f32 = 0.25;
+const MAX_ITERATIONS: usize = 7;
 const LOCAL_MAP_SIZE: usize = 60;
 const RMSE_THRESHOLD: f32 = VOXEL_SIZE / 4.0;
 
@@ -32,7 +32,15 @@ const KEYFRAME_DIST_THRESHOLD: f32 = 0.01; // meters
 const KEYFRAME_ANGLE_THRESHOLD: f32 = 0.1 * std::f32::consts::PI / 180.0; // radians
 
 const UPDATE_LOCAL_MAP_EVERY_N_FRAMES: usize = 2;
-const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 4;
+const GLOBAL_MAP_ACCUMULATE_EVERY_N_FRAMES: usize = 3;
+
+// IMU外部パラメータ: LiDAR座標系から見たIMUの姿勢 (T_L_I)
+// Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
+// Translation (x, y, z)  : 0.00425, 0.00418, -0.00446  [m]
+const IMU_TO_LIDAR_QUAT_X: f64 = -0.705437;
+const IMU_TO_LIDAR_QUAT_Y: f64 =  0.708767;
+const IMU_TO_LIDAR_QUAT_Z: f64 = -0.00246579;
+const IMU_TO_LIDAR_QUAT_W: f64 =  0.00097028;
 
 
 #[derive(Serialize)]
@@ -92,6 +100,14 @@ fn main() -> Result<()> {
 
     println!("Loaded {} PCD files from {}", pcd_paths.len(), PCD_DIR);
     println!("Loaded {} IMU samples from {}", imu_data.len(), IMU_FILE_PATH);
+
+    // R_L_I: IMU座標系 → LiDAR座標系への回転 (外部パラメータより)
+    let imu_to_lidar = UnitQuaternion::new_normalize(Quaternion::new(
+        IMU_TO_LIDAR_QUAT_W,
+        IMU_TO_LIDAR_QUAT_X,
+        IMU_TO_LIDAR_QUAT_Y,
+        IMU_TO_LIDAR_QUAT_Z,
+    ));
 
     let mut icp_trajectory_log: Vec<PoseData> = Vec::new();
 
@@ -179,13 +195,15 @@ fn main() -> Result<()> {
             &gicp_odometry.velocity, 
             gicp_odometry.last_timestamp, 
             current_frame_timestamp, 
-            &imu_data
+            &imu_data,
+            &imu_to_lidar,
         );
 
         let rotation_traj = build_rotation_trajectory(
             &imu_data, 
             min_timestamp  / 1_000_000_000.0, 
-            max_timestamp / 1_000_000_000.0
+            max_timestamp / 1_000_000_000.0,
+            &imu_to_lidar,
         );
         println!("aaaa");
 
